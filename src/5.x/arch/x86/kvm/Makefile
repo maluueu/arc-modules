@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0
 
+ifeq ($(CONFIG_KVM),m)
+EXTRA_CFLAGS+=-DCONFIG_X86_64
+CONFIG_KVM_WERROR=m
+endif
+ifeq ($(CONFIG_KVM_INTEL),m)
+  EXTRA_CFLAGS+=-DCONFIG_KVM_INTEL -DCONFIG_KVM_INTEL_MODULE
+endif
+
 ccflags-y += -Iarch/x86/kvm
 ccflags-$(CONFIG_KVM_WERROR) += -Werror
 
