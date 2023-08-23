@@ -57,6 +57,23 @@
 #include "hpsa.h"
 
 /*
+ERROR: modpost: "check_signature" /drivers/scsi/hpsa.ko] undefined!
+*/
+#if 1
+// From: lib/check_signature.c
+int check_signature(const volatile void __iomem *io_addr,
+			const unsigned char *signature, int length)
+{
+	while (length--) {
+		if (readb(io_addr) != *signature)
+			return 0;
+		io_addr++;
+		signature++;
+	}
+	return 1;
+}
+#endif
+/*
  * HPSA_DRIVER_VERSION must be 3 byte values (0-255) separated by '.'
  * with an optional trailing '-' followed by a byte value (0-255).
  */

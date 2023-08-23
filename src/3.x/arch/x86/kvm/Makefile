@@ -1,4 +1,11 @@
 
+ifeq ($(CONFIG_KVM),m)
+EXTRA_CFLAGS+=-DCONFIG_X86_64
+endif
+ifeq ($(CONFIG_KVM_INTEL),m)
+  EXTRA_CFLAGS+=-DCONFIG_KVM_INTEL -DCONFIG_KVM_INTEL_MODULE
+endif
+
 ccflags-y += -Ivirt/kvm -Iarch/x86/kvm
 
 CFLAGS_x86.o := -I.
