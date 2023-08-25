@@ -1,33 +1,59 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include <linux/types.h>
 #include <asm/byteorder.h>
 #include <linux/bitops.h>
-#include <linux/errno.h>
+#include <linux/if_ether.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#define __PREVENT_DUMP_MEM_ARR__
+#define __PREVENT_PXP_GLOBAL_WIN__
 #include "qed.h"
-#include <linux/qed/qed_chain.h>
+#include "qed_chain.h"
 #include "qed_cxt.h"
 #include "qed_dcbx.h"
 #include "qed_hsi.h"
 #include "qed_hw.h"
 #include "qed_int.h"
+#include "qed_iro_hsi.h"
 #include "qed_reg_addr.h"
 #include "qed_sp.h"
 #include "qed_sriov.h"
+#include "qed_vf.h"
 
 void qed_sp_destroy_request(struct qed_hwfn *p_hwfn,
 			    struct qed_spq_entry *p_ent)
 {
-	/* qed_spq_get_entry() can either get an entry from the free_pool,
-	 * or, if no entries are left, allocate a new entry and add it to
-	 * the unlimited_pending list.
-	 */
 	if (p_ent->queue == &p_hwfn->p_spq->unlimited_pending)
 		kfree(p_ent);
 	else
@@ -43,22 +69,21 @@ int qed_sp_init_request(struct qed_hwfn *p_hwfn,
 	int rc;
 
 	if (!pp_ent)
-		return -ENOMEM;
+		return -EINVAL;
 
+	/* Get an SPQ entry */
 	rc = qed_spq_get_entry(p_hwfn, pp_ent);
-
 	if (rc)
 		return rc;
 
+	/* Fill the SPQ entry */
 	p_ent = *pp_ent;
-
-	p_ent->elem.hdr.cid		= cpu_to_le32(opaque_cid);
-	p_ent->elem.hdr.cmd_id		= cmd;
-	p_ent->elem.hdr.protocol_id	= protocol;
-
-	p_ent->priority		= QED_SPQ_PRIORITY_NORMAL;
-	p_ent->comp_mode	= p_data->comp_mode;
-	p_ent->comp_done.done	= 0;
+	p_ent->elem.hdr.cid = cpu_to_le32(opaque_cid);
+	p_ent->elem.hdr.cmd_id = cmd;
+	p_ent->elem.hdr.protocol_id = protocol;
+	p_ent->priority = QED_SPQ_PRIORITY_NORMAL;
+	p_ent->comp_mode = p_data->comp_mode;
+	p_ent->comp_done.done = 0;
 
 	switch (p_ent->comp_mode) {
 	case QED_SPQ_MODE_EBLOCK:
@@ -85,10 +110,15 @@ int qed_sp_init_request(struct qed_hwfn *p_hwfn,
 		goto err;
 	}
 
-	DP_VERBOSE(p_hwfn, QED_MSG_SPQ,
-		   "Initialized: CID %08x cmd %02x protocol %02x data_addr %lu comp_mode [%s]\n",
-		   opaque_cid, cmd, protocol,
-		   (unsigned long)&p_ent->ramrod,
+	DP_VERBOSE(p_hwfn,
+		   QED_MSG_SPQ,
+		   "Initialized: CID %08x %s:[%02x] %s:%02x data_addr %llx comp_mode [%s]\n",
+		   opaque_cid,
+		   qed_get_ramrod_cmd_id_str(protocol, cmd),
+		   cmd,
+		   qed_get_protocol_type_str(protocol),
+		   protocol,
+		   (unsigned long long)(uintptr_t) & p_ent->ramrod,
 		   D_TRINE(p_ent->comp_mode, QED_SPQ_MODE_EBLOCK,
 			   QED_SPQ_MODE_BLOCK, "MODE_EBLOCK", "MODE_BLOCK",
 			   "MODE_CB"));
@@ -146,21 +176,14 @@ qed_set_pf_update_tunn_mode(struct qed_tunnel_info *p_tun,
 static void qed_set_tunn_cls_info(struct qed_tunnel_info *p_tun,
 				  struct qed_tunnel_info *p_src)
 {
-	int type;
-
 	p_tun->b_update_rx_cls = p_src->b_update_rx_cls;
 	p_tun->b_update_tx_cls = p_src->b_update_tx_cls;
 
-	type = qed_tunn_clss_to_fw_clss(p_src->vxlan.tun_cls);
-	p_tun->vxlan.tun_cls = type;
-	type = qed_tunn_clss_to_fw_clss(p_src->l2_gre.tun_cls);
-	p_tun->l2_gre.tun_cls = type;
-	type = qed_tunn_clss_to_fw_clss(p_src->ip_gre.tun_cls);
-	p_tun->ip_gre.tun_cls = type;
-	type = qed_tunn_clss_to_fw_clss(p_src->l2_geneve.tun_cls);
-	p_tun->l2_geneve.tun_cls = type;
-	type = qed_tunn_clss_to_fw_clss(p_src->ip_geneve.tun_cls);
-	p_tun->ip_geneve.tun_cls = type;
+	p_tun->vxlan.tun_cls = p_src->vxlan.tun_cls;
+	p_tun->l2_gre.tun_cls = p_src->l2_gre.tun_cls;
+	p_tun->ip_gre.tun_cls = p_src->ip_gre.tun_cls;
+	p_tun->l2_geneve.tun_cls = p_src->l2_geneve.tun_cls;
+	p_tun->ip_geneve.tun_cls = p_src->ip_geneve.tun_cls;
 }
 
 static void qed_set_tunn_ports(struct qed_tunnel_info *p_tun,
@@ -177,17 +200,17 @@ static void qed_set_tunn_ports(struct qed_tunnel_info *p_tun,
 }
 
 static void
-__qed_set_ramrod_tunnel_param(u8 *p_tunn_cls,
+__qed_set_ramrod_tunnel_param(u8 * p_tunn_cls,
 			      struct qed_tunn_update_type *tun_type)
 {
-	*p_tunn_cls = tun_type->tun_cls;
+	*p_tunn_cls = qed_tunn_clss_to_fw_clss(tun_type->tun_cls);
 }
 
 static void
-qed_set_ramrod_tunnel_param(u8 *p_tunn_cls,
+qed_set_ramrod_tunnel_param(u8 * p_tunn_cls,
 			    struct qed_tunn_update_type *tun_type,
-			    u8 *p_update_port,
-			    __le16 *p_port,
+			    u8 * p_update_port,
+			    __le16 * p_port,
 			    struct qed_tunn_update_udp_port *p_udp_port)
 {
 	__qed_set_ramrod_tunnel_param(p_tunn_cls, tun_type);
@@ -248,9 +271,14 @@ static void qed_set_hw_tunn_mode_port(struct qed_hwfn *p_hwfn,
 				      struct qed_ptt *p_ptt,
 				      struct qed_tunnel_info *p_tunn)
 {
+	if (QED_IS_BB_A0(p_hwfn->cdev)) {
+		DP_NOTICE(p_hwfn,
+			  "A0 chip: tunnel hw config is not supported\n");
+		return;
+	}
+
 	if (p_tunn->vxlan_port.b_update_port)
-		qed_set_vxlan_dest_port(p_hwfn, p_ptt,
-					p_tunn->vxlan_port.port);
+		qed_set_vxlan_dest_port(p_hwfn, p_ptt, p_tunn->vxlan_port.port);
 
 	if (p_tunn->geneve_port.b_update_port)
 		qed_set_geneve_dest_port(p_hwfn, p_ptt,
@@ -265,6 +293,12 @@ qed_tunn_set_pf_start_params(struct qed_hwfn *p_hwfn,
 			     struct pf_start_tunnel_config *p_tunn_cfg)
 {
 	struct qed_tunnel_info *p_tun = &p_hwfn->cdev->tunnel;
+
+	if (QED_IS_BB_A0(p_hwfn->cdev)) {
+		DP_NOTICE(p_hwfn,
+			  "A0 chip: tunnel pf start config is not supported\n");
+		return;
+	}
 
 	if (!p_src)
 		return;
@@ -297,22 +331,22 @@ qed_tunn_set_pf_start_params(struct qed_hwfn *p_hwfn,
 
 int qed_sp_pf_start(struct qed_hwfn *p_hwfn,
 		    struct qed_ptt *p_ptt,
-		    struct qed_tunnel_info *p_tunn,
-		    bool allow_npar_tx_switch)
+		    struct qed_tunnel_info *p_tunn, bool allow_npar_tx_switch)
 {
-	struct outer_tag_config_struct *outer_tag_config;
 	struct pf_start_ramrod_data *p_ramrod = NULL;
 	u16 sb = qed_int_get_sp_sb_id(p_hwfn);
 	u8 sb_index = p_hwfn->p_eq->eq_sb_index;
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	u8 page_cnt, i;
-	int rc;
+	int rc = -EOPNOTSUPP;
+	u8 page_cnt;
+	u8 i;
 
 	/* update initial eq producer */
 	qed_eq_prod_update(p_hwfn,
 			   qed_chain_get_prod_idx(&p_hwfn->p_eq->chain));
 
+	/* Initialize the SPQ entry for the ramrod */
 	memset(&init_data, 0, sizeof(init_data));
 	init_data.cid = qed_spq_get_cid(p_hwfn);
 	init_data.opaque_fid = p_hwfn->hw_info.opaque_fid;
@@ -324,53 +358,62 @@ int qed_sp_pf_start(struct qed_hwfn *p_hwfn,
 	if (rc)
 		return rc;
 
+	/* Fill the ramrod data */
 	p_ramrod = &p_ent->ramrod.pf_start;
+	p_ramrod->event_ring_sb_id = cpu_to_le16(sb);
+	p_ramrod->event_ring_sb_index = sb_index;
+	p_ramrod->path_id = QED_PATH_ID(p_hwfn);
 
-	p_ramrod->event_ring_sb_id	= cpu_to_le16(sb);
-	p_ramrod->event_ring_sb_index	= sb_index;
-	p_ramrod->path_id		= QED_PATH_ID(p_hwfn);
-	p_ramrod->dont_log_ramrods	= 0;
-	p_ramrod->log_type_mask		= cpu_to_le16(0xf);
+	/* For easier debugging */
+	p_ramrod->dont_log_ramrods = 0;
+	p_ramrod->log_type_mask = cpu_to_le16(0x8f);
 
 	if (test_bit(QED_MF_OVLAN_CLSS, &p_hwfn->cdev->mf_bits))
 		p_ramrod->mf_mode = MF_OVLAN;
 	else
 		p_ramrod->mf_mode = MF_NPAR;
 
-	outer_tag_config = &p_ramrod->outer_tag_config;
-	outer_tag_config->outer_tag.tci = cpu_to_le16(p_hwfn->hw_info.ovlan);
-
+	p_ramrod->outer_tag_config.outer_tag.tci =
+	    cpu_to_le16(p_hwfn->hw_info.ovlan);
 	if (test_bit(QED_MF_8021Q_TAGGING, &p_hwfn->cdev->mf_bits)) {
-		outer_tag_config->outer_tag.tpid = cpu_to_le16(ETH_P_8021Q);
+		p_ramrod->outer_tag_config.outer_tag.tpid = ETH_P_8021Q;
 	} else if (test_bit(QED_MF_8021AD_TAGGING, &p_hwfn->cdev->mf_bits)) {
-		outer_tag_config->outer_tag.tpid = cpu_to_le16(ETH_P_8021AD);
-		outer_tag_config->enable_stag_pri_change = 1;
+		p_ramrod->outer_tag_config.outer_tag.tpid = ETH_P_8021AD;
+		p_ramrod->outer_tag_config.enable_stag_pri_change = 1;
 	}
 
-	outer_tag_config->pri_map_valid = 1;
+	p_ramrod->outer_tag_config.pri_map_valid = 1;
 	for (i = 0; i < QED_MAX_PFC_PRIORITIES; i++)
-		outer_tag_config->inner_to_outer_pri_map[i] = i;
+		p_ramrod->outer_tag_config.inner_to_outer_pri_map[i] = i;
 
 	/* enable_stag_pri_change should be set if port is in BD mode or,
 	 * UFP with Host Control mode.
 	 */
 	if (test_bit(QED_MF_UFP_SPECIFIC, &p_hwfn->cdev->mf_bits)) {
 		if (p_hwfn->ufp_info.pri_type == QED_UFP_PRI_OS)
-			outer_tag_config->enable_stag_pri_change = 1;
+			p_ramrod->outer_tag_config.enable_stag_pri_change = 1;
 		else
-			outer_tag_config->enable_stag_pri_change = 0;
+			p_ramrod->outer_tag_config.enable_stag_pri_change = 0;
 
-		outer_tag_config->outer_tag.tci |=
-		    cpu_to_le16(((u16)p_hwfn->ufp_info.tc << 13));
+		p_ramrod->outer_tag_config.outer_tag.tci |=
+		    cpu_to_le16(((u16) p_hwfn->ufp_info.tc << 13));
 	}
+
+	if (test_bit(QED_MF_QINQ_SPECIFIC, &p_hwfn->cdev->mf_bits))
+		p_ramrod->outer_tag_config.outer_tag.tci |=
+		    cpu_to_le16(((u16) p_hwfn->qinq_tc << 13));
 
 	/* Place EQ address in RAMROD */
 	DMA_REGPAIR_LE(p_ramrod->event_ring_pbl_addr,
 		       qed_chain_get_pbl_phys(&p_hwfn->p_eq->chain));
-	page_cnt = (u8)qed_chain_get_page_cnt(&p_hwfn->p_eq->chain);
+	page_cnt = (u8) qed_chain_get_page_cnt(&p_hwfn->p_eq->chain);
 	p_ramrod->event_ring_num_pages = page_cnt;
-	DMA_REGPAIR_LE(p_ramrod->consolid_q_pbl_addr,
+
+	/* Place consolidation queue address in ramrod */
+	DMA_REGPAIR_LE(p_ramrod->consolid_q_pbl_base_addr,
 		       qed_chain_get_pbl_phys(&p_hwfn->p_consq->chain));
+	page_cnt = (u8) qed_chain_get_page_cnt(&p_hwfn->p_consq->chain);
+	p_ramrod->consolid_q_num_pages = page_cnt;
 
 	qed_tunn_set_pf_start_params(p_hwfn, p_tunn, &p_ramrod->tunnel_config);
 
@@ -387,8 +430,9 @@ int qed_sp_pf_start(struct qed_hwfn *p_hwfn,
 	case QED_PCI_ISCSI:
 		p_ramrod->personality = PERSONALITY_ISCSI;
 		break;
-	case QED_PCI_ETH_ROCE:
 	case QED_PCI_ETH_IWARP:
+	case QED_PCI_ETH_ROCE:
+	case QED_PCI_ETH_RDMA:
 		p_ramrod->personality = PERSONALITY_RDMA_AND_ETH;
 		break;
 	default:
@@ -403,27 +447,33 @@ int qed_sp_pf_start(struct qed_hwfn *p_hwfn,
 		p_ramrod->base_vf_id = (u8) p_iov->first_vf_in_pf;
 		p_ramrod->num_vfs = (u8) p_iov->total_vfs;
 	}
+	/* @@@TBD - update also the "ROCE_VER_KEY" entries when the FW RoCE HSI
+	 * version is available.
+	 */
 	p_ramrod->hsi_fp_ver.major_ver_arr[ETH_VER_KEY] = ETH_HSI_VER_MAJOR;
 	p_ramrod->hsi_fp_ver.minor_ver_arr[ETH_VER_KEY] = ETH_HSI_VER_MINOR;
 
-	DP_VERBOSE(p_hwfn, QED_MSG_SPQ,
-		   "Setting event_ring_sb [id %04x index %02x], outer_tag.tci [%d]\n",
-		   sb, sb_index, outer_tag_config->outer_tag.tci);
+	DP_VERBOSE(p_hwfn,
+		   QED_MSG_SPQ,
+		   "Setting event_ring_sb [id %04x index %02x], outer_tag.tpid [%d], outer_tag.tci [%d]\n",
+		   sb,
+		   sb_index,
+		   p_ramrod->outer_tag_config.outer_tag.tpid,
+		   p_ramrod->outer_tag_config.outer_tag.tci);
 
 	rc = qed_spq_post(p_hwfn, p_ent, NULL);
 
 	if (p_tunn)
-		qed_set_hw_tunn_mode_port(p_hwfn, p_ptt,
-					  &p_hwfn->cdev->tunnel);
+		qed_set_hw_tunn_mode_port(p_hwfn, p_ptt, &p_hwfn->cdev->tunnel);
 
 	return rc;
 }
 
-int qed_sp_pf_update(struct qed_hwfn *p_hwfn)
+int qed_sp_pf_update_dcbx(struct qed_hwfn *p_hwfn)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc;
+	int rc = -EOPNOTSUPP;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -447,7 +497,7 @@ int qed_sp_pf_update_ufp(struct qed_hwfn *p_hwfn)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc;
+	int rc = -EOPNOTSUPP;
 
 	if (p_hwfn->ufp_info.pri_type == QED_UFP_PRI_UNKNOWN) {
 		DP_INFO(p_hwfn, "Invalid priority type %d\n",
@@ -476,19 +526,104 @@ int qed_sp_pf_update_ufp(struct qed_hwfn *p_hwfn)
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }
 
+/* QM rate limiter resolution is 1.6Mbps */
+#define QM_RL_RESOLUTION(mb_val)        ((mb_val) * 10 / 16)
+
+/* FW uses 1/64k to express gd */
+#define FW_GD_RESOLUTION(gd)            (64 * 1024 / (gd))
+
+static u16 qed_sp_rl_mb_to_qm(u32 mb_val)
+{
+	return (u16) min_t(u32, (u16) (~0U), QM_RL_RESOLUTION(mb_val));
+}
+
+static u16 qed_sp_rl_gd_denom(u32 gd)
+{
+	return gd ? (u16) min_t(u32, (u16) (~0U), FW_GD_RESOLUTION(gd)) : 0;
+}
+
+int qed_sp_rl_update(struct qed_hwfn *p_hwfn,
+		     struct qed_rl_update_params *params)
+{
+	struct qed_spq_entry *p_ent = NULL;
+	int rc = -EOPNOTSUPP;
+	struct rl_update_ramrod_data *rl_update;
+	struct qed_sp_init_data init_data;
+
+	/* Get SPQ entry */
+	memset(&init_data, 0, sizeof(init_data));
+	init_data.cid = qed_spq_get_cid(p_hwfn);
+	init_data.opaque_fid = p_hwfn->hw_info.opaque_fid;
+	init_data.comp_mode = QED_SPQ_MODE_EBLOCK;
+
+	rc = qed_sp_init_request(p_hwfn, &p_ent,
+				 COMMON_RAMROD_RL_UPDATE, PROTOCOLID_COMMON,
+				 &init_data);
+	if (rc)
+		return rc;
+
+	rl_update = &p_ent->ramrod.rl_update;
+
+	rl_update->qcn_update_param_flg = params->qcn_update_param_flg;
+	rl_update->dcqcn_update_param_flg = params->dcqcn_update_param_flg;
+	rl_update->rl_init_flg = params->rl_init_flg;
+	rl_update->rl_start_flg = params->rl_start_flg;
+	rl_update->rl_stop_flg = params->rl_stop_flg;
+	rl_update->rl_id_first = params->rl_id_first;
+	rl_update->rl_id_last = params->rl_id_last;
+	rl_update->rl_dc_qcn_flg = params->rl_dc_qcn_flg;
+	rl_update->rl_bc_rate = cpu_to_le32(params->rl_bc_rate);
+	rl_update->rl_max_rate =
+	    cpu_to_le16(qed_sp_rl_mb_to_qm(params->rl_max_rate));
+	rl_update->rl_r_ai = cpu_to_le16(qed_sp_rl_mb_to_qm(params->rl_r_ai));
+	rl_update->rl_r_hai = cpu_to_le16(qed_sp_rl_mb_to_qm(params->rl_r_hai));
+	rl_update->dcqcn_g = cpu_to_le16(qed_sp_rl_gd_denom(params->dcqcn_gd));
+	rl_update->dcqcn_k_us = cpu_to_le32(params->dcqcn_k_us);
+	rl_update->dcqcn_timeuot_us = cpu_to_le32(params->dcqcn_timeuot_us);
+	rl_update->qcn_timeuot_us = cpu_to_le32(params->qcn_timeuot_us);
+
+	DP_VERBOSE(p_hwfn,
+		   QED_MSG_SPQ,
+		   "rl_params: qcn_update_param_flg %x, dcqcn_update_param_flg %x, rl_init_flg %x, rl_start_flg %x, rl_stop_flg %x, rl_id_first %x, rl_id_last %x, rl_dc_qcn_flg %x, rl_bc_rate %x, rl_max_rate %x, rl_r_ai %x, rl_r_hai %x, dcqcn_g %x, dcqcn_k_us %x, dcqcn_timeuot_us %x, qcn_timeuot_us %x\n",
+		   rl_update->qcn_update_param_flg,
+		   rl_update->dcqcn_update_param_flg,
+		   rl_update->rl_init_flg,
+		   rl_update->rl_start_flg,
+		   rl_update->rl_stop_flg,
+		   rl_update->rl_id_first,
+		   rl_update->rl_id_last,
+		   rl_update->rl_dc_qcn_flg,
+		   rl_update->rl_bc_rate,
+		   rl_update->rl_max_rate,
+		   rl_update->rl_r_ai,
+		   rl_update->rl_r_hai,
+		   rl_update->dcqcn_g,
+		   rl_update->dcqcn_k_us,
+		   rl_update->dcqcn_timeuot_us, rl_update->qcn_timeuot_us);
+
+	return qed_spq_post(p_hwfn, p_ent, NULL);
+}
+
 /* Set pf update ramrod command params */
-int qed_sp_pf_update_tunn_cfg(struct qed_hwfn *p_hwfn,
-			      struct qed_ptt *p_ptt,
-			      struct qed_tunnel_info *p_tunn,
-			      enum spq_mode comp_mode,
-			      struct qed_spq_comp_cb *p_comp_data)
+int
+qed_sp_pf_update_tunn_cfg(struct qed_hwfn *p_hwfn,
+			  struct qed_ptt *p_ptt,
+			  struct qed_tunnel_info *p_tunn,
+			  enum spq_mode comp_mode,
+			  struct qed_spq_comp_cb *p_comp_data)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc;
+	int rc = -EOPNOTSUPP;
 
 	if (IS_VF(p_hwfn->cdev))
 		return qed_vf_pf_tunnel_param_update(p_hwfn, p_tunn);
+
+	if (QED_IS_BB_A0(p_hwfn->cdev)) {
+		DP_NOTICE(p_hwfn,
+			  "A0 chip: tunnel pf update config is not supported\n");
+		return rc;
+	}
 
 	if (!p_tunn)
 		return -EINVAL;
@@ -522,7 +657,7 @@ int qed_sp_pf_stop(struct qed_hwfn *p_hwfn)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc;
+	int rc = -EOPNOTSUPP;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -564,7 +699,7 @@ int qed_sp_pf_update_stag(struct qed_hwfn *p_hwfn)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc;
+	int rc = -EOPNOTSUPP;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -580,9 +715,10 @@ int qed_sp_pf_update_stag(struct qed_hwfn *p_hwfn)
 
 	p_ent->ramrod.pf_update.update_mf_vlan_flag = true;
 	p_ent->ramrod.pf_update.mf_vlan = cpu_to_le16(p_hwfn->hw_info.ovlan);
+
 	if (test_bit(QED_MF_UFP_SPECIFIC, &p_hwfn->cdev->mf_bits))
 		p_ent->ramrod.pf_update.mf_vlan |=
-			cpu_to_le16(((u16)p_hwfn->ufp_info.tc << 13));
+		    cpu_to_le16(((u16) p_hwfn->ufp_info.tc << 13));
 
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }

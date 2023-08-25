@@ -1,371 +1,333 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* Copyright (c) 2020 Marvell International Ltd. */
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
-#include <linux/dma-mapping.h>
-#include <linux/qed/qed_chain.h>
-#include <linux/vmalloc.h>
+#include <linux/types.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#define __PREVENT_DUMP_MEM_ARR__
+#define __PREVENT_PXP_GLOBAL_WIN__
+#include "qed_chain.h"
 
-#include "qed_dev_api.h"
-
-static void qed_chain_init(struct qed_chain *chain,
-			   const struct qed_chain_init_params *params,
-			   u32 page_cnt)
-{
-	memset(chain, 0, sizeof(*chain));
-
-	chain->elem_size = params->elem_size;
-	chain->intended_use = params->intended_use;
-	chain->mode = params->mode;
-	chain->cnt_type = params->cnt_type;
-
-	chain->elem_per_page = ELEMS_PER_PAGE(params->elem_size,
-					      params->page_size);
-	chain->usable_per_page = USABLE_ELEMS_PER_PAGE(params->elem_size,
-						       params->page_size,
-						       params->mode);
-	chain->elem_unusable = UNUSABLE_ELEMS_PER_PAGE(params->elem_size,
-						       params->mode);
-
-	chain->elem_per_page_mask = chain->elem_per_page - 1;
-	chain->next_page_mask = chain->usable_per_page &
-				chain->elem_per_page_mask;
-
-	chain->page_size = params->page_size;
-	chain->page_cnt = page_cnt;
-	chain->capacity = chain->usable_per_page * page_cnt;
-	chain->size = chain->elem_per_page * page_cnt;
-
-	if (params->ext_pbl_virt) {
-		chain->pbl_sp.table_virt = params->ext_pbl_virt;
-		chain->pbl_sp.table_phys = params->ext_pbl_phys;
-
-		chain->b_external_pbl = true;
-	}
-}
-
-static void qed_chain_init_next_ptr_elem(const struct qed_chain *chain,
-					 void *virt_curr, void *virt_next,
-					 dma_addr_t phys_next)
-{
-	struct qed_chain_next *next;
-	u32 size;
-
-	size = chain->elem_size * chain->usable_per_page;
-	next = virt_curr + size;
-
-	DMA_REGPAIR_LE(next->next_phys, phys_next);
-	next->next_virt = virt_next;
-}
-
-static void qed_chain_init_mem(struct qed_chain *chain, void *virt_addr,
-			       dma_addr_t phys_addr)
-{
-	chain->p_virt_addr = virt_addr;
-	chain->p_phys_addr = phys_addr;
-}
-
-static void qed_chain_free_next_ptr(struct qed_dev *cdev,
-				    struct qed_chain *chain)
-{
-	struct device *dev = &cdev->pdev->dev;
-	struct qed_chain_next *next;
-	dma_addr_t phys, phys_next;
-	void *virt, *virt_next;
-	u32 size, i;
-
-	size = chain->elem_size * chain->usable_per_page;
-	virt = chain->p_virt_addr;
-	phys = chain->p_phys_addr;
-
-	for (i = 0; i < chain->page_cnt; i++) {
-		if (!virt)
-			break;
-
-		next = virt + size;
-		virt_next = next->next_virt;
-		phys_next = HILO_DMA_REGPAIR(next->next_phys);
-
-		dma_free_coherent(dev, chain->page_size, virt, phys);
-
-		virt = virt_next;
-		phys = phys_next;
-	}
-}
-
-static void qed_chain_free_single(struct qed_dev *cdev,
-				  struct qed_chain *chain)
-{
-	if (!chain->p_virt_addr)
-		return;
-
-	dma_free_coherent(&cdev->pdev->dev, chain->page_size,
-			  chain->p_virt_addr, chain->p_phys_addr);
-}
-
-static void qed_chain_free_pbl(struct qed_dev *cdev, struct qed_chain *chain)
-{
-	struct device *dev = &cdev->pdev->dev;
-	struct addr_tbl_entry *entry;
-	u32 i;
-
-	if (!chain->pbl.pp_addr_tbl)
-		return;
-
-	for (i = 0; i < chain->page_cnt; i++) {
-		entry = chain->pbl.pp_addr_tbl + i;
-		if (!entry->virt_addr)
-			break;
-
-		dma_free_coherent(dev, chain->page_size, entry->virt_addr,
-				  entry->dma_map);
-	}
-
-	if (!chain->b_external_pbl)
-		dma_free_coherent(dev, chain->pbl_sp.table_size,
-				  chain->pbl_sp.table_virt,
-				  chain->pbl_sp.table_phys);
-
-	vfree(chain->pbl.pp_addr_tbl);
-	chain->pbl.pp_addr_tbl = NULL;
-}
+#define CHAIN_PRINT_DONE 200
+#define MAX_PRINT_ELEM_SIZE 250
+#define MAX_PRINT_METADATA_SIZE 1000
 
 /**
- * qed_chain_free() - Free chain DMA memory.
+ * @brief qed_chain_get_elem_by_idx -
  *
- * @cdev: Main device structure.
- * @chain: Chain to free.
+ * Returns a pointer to an element of a chain by its index
+ *
+ * @param p_chain
+ * @param idx
+ *
+ * @return void*
  */
-void qed_chain_free(struct qed_dev *cdev, struct qed_chain *chain)
+static void *qed_chain_get_elem_by_idx(struct qed_chain *p_chain, u32 idx)
 {
-	switch (chain->mode) {
+	struct qed_chain_next *p_next = NULL;
+	u32 elem_idx, page_idx, size, i;
+	void *p_virt_addr = NULL;
+
+	if (!p_chain->p_virt_addr)
+		// add DP_ERROR
+		return p_virt_addr;
+
+	elem_idx = idx % p_chain->capacity;
+	page_idx = elem_idx / p_chain->elem_per_page;
+
+	switch (p_chain->mode) {
 	case QED_CHAIN_MODE_NEXT_PTR:
-		qed_chain_free_next_ptr(cdev, chain);
+		size = p_chain->elem_size * p_chain->usable_per_page;
+		p_virt_addr = p_chain->p_virt_addr;
+		p_next = (struct qed_chain_next *)((u8 *) p_virt_addr + size);
+		for (i = 0; i < page_idx; i++) {
+			p_virt_addr = p_next->next_virt;
+			p_next =
+			    (struct qed_chain_next *)((u8 *) p_virt_addr +
+						      size);
+			elem_idx -= p_chain->elem_per_page;
+		}
 		break;
 	case QED_CHAIN_MODE_SINGLE:
-		qed_chain_free_single(cdev, chain);
+		p_virt_addr = p_chain->p_virt_addr;
 		break;
 	case QED_CHAIN_MODE_PBL:
-		qed_chain_free_pbl(cdev, chain);
+		p_virt_addr = p_chain->pbl.pp_virt_addr_tbl[page_idx];
+		elem_idx -= page_idx * p_chain->elem_per_page;
 		break;
-	default:
-		return;
 	}
-
-	qed_chain_init_mem(chain, NULL, 0);
-}
-
-static int
-qed_chain_alloc_sanity_check(struct qed_dev *cdev,
-			     const struct qed_chain_init_params *params,
-			     u32 page_cnt)
-{
-	u64 chain_size;
-
-	chain_size = ELEMS_PER_PAGE(params->elem_size, params->page_size);
-	chain_size *= page_cnt;
-
-	if (!chain_size)
-		return -EINVAL;
-
-	/* The actual chain size can be larger than the maximal possible value
-	 * after rounding up the requested elements number to pages, and after
-	 * taking into account the unusuable elements (next-ptr elements).
-	 * The size of a "u16" chain can be (U16_MAX + 1) since the chain
-	 * size/capacity fields are of u32 type.
+	/* p_virt_addr points at this stage to the page that inclues the
+	 * requested element, and elem_idx equals to its relative index inside
+	 * the page.
 	 */
-	switch (params->cnt_type) {
-	case QED_CHAIN_CNT_TYPE_U16:
-		if (chain_size > U16_MAX + 1)
-			break;
-
-		return 0;
-	case QED_CHAIN_CNT_TYPE_U32:
-		if (chain_size > U32_MAX)
-			break;
-
-		return 0;
-	default:
-		return -EINVAL;
-	}
-
-	DP_NOTICE(cdev,
-		  "The actual chain size (0x%llx) is larger than the maximal possible value\n",
-		  chain_size);
-
-	return -EINVAL;
+	p_virt_addr = (u8 *) p_virt_addr + p_chain->elem_size * elem_idx;
+	return p_virt_addr;
 }
 
-static int qed_chain_alloc_next_ptr(struct qed_dev *cdev,
-				    struct qed_chain *chain)
+static int qed_chain_print_element_raw(struct qed_chain *p_chain,
+				       void *p_element, char *buffer)
 {
-	struct device *dev = &cdev->pdev->dev;
-	void *virt, *virt_prev = NULL;
-	dma_addr_t phys;
-	u32 i;
+	/* this will be a service function for the per chain print element function */
+	int pos = 0, length, elem_size = p_chain->elem_size;
 
-	for (i = 0; i < chain->page_cnt; i++) {
-		virt = dma_alloc_coherent(dev, chain->page_size, &phys,
-					  GFP_KERNEL);
-		if (!virt)
-			return -ENOMEM;
-
-		if (i == 0) {
-			qed_chain_init_mem(chain, virt, phys);
-			qed_chain_reset(chain);
-		} else {
-			qed_chain_init_next_ptr_elem(chain, virt_prev, virt,
-						     phys);
+	/* print element byte by byte */
+	while (elem_size > 0) {
+		length = sprintf(buffer + pos, " %02x", *(u8 *) p_element);
+		if (length < 0) {
+			pr_err("Failed to copy data to buffer\n");
+			return length;
 		}
-
-		virt_prev = virt;
+		pos += length;
+		elem_size--;
+		p_element++;
 	}
 
-	/* Last page's next element should point to the beginning of the
-	 * chain.
-	 */
-	qed_chain_init_next_ptr_elem(chain, virt_prev, chain->p_virt_addr,
-				     chain->p_phys_addr);
+	/* add tab between every element */
+	length = sprintf(buffer + pos, "	");
+	if (length < 0) {
+		pr_err("Failed to copy data to buffer");
+		return length;
+	}
 
-	return 0;
+	pos += length;
+
+	return pos;
 }
 
-static int qed_chain_alloc_single(struct qed_dev *cdev,
-				  struct qed_chain *chain)
+static int qed_chain_print_metadata_raw(struct qed_chain *p_chain, char *buffer)
 {
-	dma_addr_t phys;
-	void *virt;
+	int pos = 0, length;
 
-	virt = dma_alloc_coherent(&cdev->pdev->dev, chain->page_size,
-				  &phys, GFP_KERNEL);
-	if (!virt)
-		return -ENOMEM;
-
-	qed_chain_init_mem(chain, virt, phys);
-	qed_chain_reset(chain);
-
-	return 0;
-}
-
-static int qed_chain_alloc_pbl(struct qed_dev *cdev, struct qed_chain *chain)
-{
-	struct device *dev = &cdev->pdev->dev;
-	struct addr_tbl_entry *addr_tbl;
-	dma_addr_t phys, pbl_phys;
-	__le64 *pbl_virt;
-	u32 page_cnt, i;
-	size_t size;
-	void *virt;
-
-	page_cnt = chain->page_cnt;
-
-	size = array_size(page_cnt, sizeof(*addr_tbl));
-	if (unlikely(size == SIZE_MAX))
-		return -EOVERFLOW;
-
-	addr_tbl = vzalloc(size);
-	if (!addr_tbl)
-		return -ENOMEM;
-
-	chain->pbl.pp_addr_tbl = addr_tbl;
-
-	if (chain->b_external_pbl) {
-		pbl_virt = chain->pbl_sp.table_virt;
-		goto alloc_pages;
+	length = sprintf(buffer, "prod 0x%x [%03d], cons 0x%x [%03d]\n",
+			 qed_chain_get_prod_idx(p_chain),
+			 qed_chain_get_prod_idx(p_chain) & 0xff,
+			 qed_chain_get_cons_idx(p_chain),
+			 qed_chain_get_cons_idx(p_chain) & 0xff);
+	if (length < 0) {
+		pr_err("Failed to copy Metadata to buffer\n");
+		return length;
 	}
 
-	size = array_size(page_cnt, sizeof(*pbl_virt));
-	if (unlikely(size == SIZE_MAX))
-		return -EOVERFLOW;
-
-	pbl_virt = dma_alloc_coherent(dev, size, &pbl_phys, GFP_KERNEL);
-	if (!pbl_virt)
-		return -ENOMEM;
-
-	chain->pbl_sp.table_virt = pbl_virt;
-	chain->pbl_sp.table_phys = pbl_phys;
-	chain->pbl_sp.table_size = size;
-
-alloc_pages:
-	for (i = 0; i < page_cnt; i++) {
-		virt = dma_alloc_coherent(dev, chain->page_size, &phys,
-					  GFP_KERNEL);
-		if (!virt)
-			return -ENOMEM;
-
-		if (i == 0) {
-			qed_chain_init_mem(chain, virt, phys);
-			qed_chain_reset(chain);
-		}
-
-		/* Fill the PBL table with the physical address of the page */
-		pbl_virt[i] = cpu_to_le64(phys);
-
-		/* Keep the virtual address of the page */
-		addr_tbl[i].virt_addr = virt;
-		addr_tbl[i].dma_map = phys;
+	pos += length;
+	length = sprintf(buffer + pos,
+			 "Chain capacity: %d, Chain size: %d\n",
+			 p_chain->capacity, p_chain->size);
+	if (length < 0) {
+		pr_err("Failed to copy Metadata to buffer\n");
+		return length;
 	}
 
-	return 0;
+	pos += length;
+
+	return pos;
 }
 
 /**
- * qed_chain_alloc() - Allocate and initialize a chain.
+ * @chain: The chain for printing
  *
- * @cdev: Main device structure.
- * @chain: Chain to be processed.
- * @params: Chain initialization parameters.
- *
- * Return: 0 on success, negative errno otherwise.
- */
-int qed_chain_alloc(struct qed_dev *cdev, struct qed_chain *chain,
-		    struct qed_chain_init_params *params)
+ * @element_indx: This is both an in parameter and an out
+ *                      parameter. The function starts at the element at
+ *                      this index and prints elements either until stop
+ *                      element is reached or buffer is exhausted. The
+ *                      value of this parameter *after* the function
+ *                      returns holds the element index reached.
+ * @stop_indx: The final index for printing, the element till this
+ *             index is printed.
+ **/
+static int qed_chain_print_to_kernel(struct qed_chain *p_chain,
+				     u32 * element_indx, u32 stop_indx)
 {
-	u32 page_cnt;
-	int rc;
+	char prefix[32];
+	void *p_element;
+	int rc = 0;
 
-	if (!params->page_size)
-		params->page_size = QED_CHAIN_PAGE_SIZE;
+	if (stop_indx != p_chain->capacity)
+		stop_indx++;
 
-	if (params->mode == QED_CHAIN_MODE_SINGLE)
-		page_cnt = 1;
-	else
-		page_cnt = QED_CHAIN_PAGE_CNT(params->num_elems,
-					      params->elem_size,
-					      params->page_size,
-					      params->mode);
+	while (*element_indx != stop_indx) {
+		*element_indx = *element_indx % p_chain->capacity;
+		p_element = qed_chain_get_elem_by_idx(p_chain, *element_indx);
 
-	rc = qed_chain_alloc_sanity_check(cdev, params, page_cnt);
-	if (rc) {
-		DP_NOTICE(cdev,
-			  "Cannot allocate a chain with the given arguments:\n");
-		DP_NOTICE(cdev,
-			  "[use_mode %d, mode %d, cnt_type %d, num_elems %d, elem_size %zu, page_size %u]\n",
-			  params->intended_use, params->mode, params->cnt_type,
-			  params->num_elems, params->elem_size,
-			  params->page_size);
+		snprintf(prefix,
+			 sizeof(prefix), "%p-%d:", p_chain, *element_indx);
+		print_hex_dump(KERN_INFO,
+			       prefix,
+			       DUMP_PREFIX_NONE,
+			       16, 1, p_element, p_chain->elem_size, false);
+
+		(*element_indx)++;
+	}
+
+	/* check if all elements were printed */
+	if (*element_indx != stop_indx)
+		rc = CHAIN_PRINT_DONE;
+
+	return rc;
+}
+
+static int qed_chain_print_to_buff(struct qed_chain *p_chain, char
+				   *buffer,
+				   int (*func_ptr_print_element) (struct
+								  qed_chain *
+								  p_chain,
+								  void
+								  *p_element,
+								  char
+								  *buf_to_print),
+				   u32 * element_indx, u32 stop_indx,
+				   u32 buffer_size)
+{
+	u32 prod_indx, cons_indx, pos = 0;
+	char producer[13] = " [Producer] ";
+	char consumer[13] = " [Consumer] ";
+	void *p_element;
+	int rc = 0;
+
+	/* If the stop index doesn't equal to the chain capacity, add one to
+	 * print the last index.
+	 */
+	if (stop_indx != p_chain->capacity)
+		stop_indx++;
+
+	/* print elements to buffer until buffer is full
+	 * or done traversing all elements
+	 */
+	while (buffer_size > MAX_PRINT_ELEM_SIZE + pos &&
+	       *element_indx != stop_indx) {
+		*element_indx = *element_indx % p_chain->capacity;
+
+		/* get index of cons and prod */
+		prod_indx = qed_chain_get_prod_idx(p_chain) % p_chain->capacity;
+		cons_indx = qed_chain_get_cons_idx(p_chain) % p_chain->capacity;
+
+		pos += sprintf(buffer + pos, "%6d:", *element_indx);
+
+		if (prod_indx == *element_indx)
+			pos += snprintf(buffer + pos, sizeof(producer),
+					producer);
+
+		if (cons_indx == *element_indx)
+			pos += snprintf(buffer + pos, sizeof(consumer),
+					consumer);
+
+		p_element = qed_chain_get_elem_by_idx(p_chain, *element_indx);
+		rc = (*func_ptr_print_element) (p_chain, p_element, buffer +
+						pos);
+		if (rc < 0)
+			break;
+
+		pos += strlen(buffer + pos);
+		(*element_indx)++;
+	}
+
+	/* check if all elements were printed */
+	if (*element_indx != stop_indx)
+		rc = CHAIN_PRINT_DONE;
+
+	return rc;
+}
+
+/**
+ * @chain: The chain for printing
+ * @buffer: The buffer that the elements are copied to. The user
+ *              is responsible for managing the buffer, copying the
+ *              data from the buffer when the buffer is full and
+ *              allocating a new buffer and calling the function
+ *              again if not all data was printed.
+ * @buffer_size: allocated buffer size
+ * @element_indx: This is both an in parameter and an out
+ *                      parameter. The function starts at the element at
+ *                      this index and prints elements either until stop
+ *                      element is reached or buffer is exhausted. The
+ *                      value of this parameter *after* the function
+ *                      returns holds the element index reached.
+ * @stop_indx: The final index for printing, the element in this
+ *                      index is printed.
+ * @print_metadata: Indicates if chain metadata should be
+ *                              printed.
+ * @print_to_kernel: dump all chain elements in os/kernel logs,
+ *                   if set then the api will not print anything to buffer.
+ **/
+/* the function will also get a pointer to the function that prints the element and pointer to a function that prints the metadata */
+int qed_chain_print(struct qed_chain *p_chain, char
+		    *buffer,
+		    u32
+		    buffer_size,
+		    u32
+		    * element_indx,
+		    u32
+		    stop_indx,
+		    bool
+		    print_metadata,
+		    bool
+		    print_to_kernel,
+		    int (*func_ptr_print_element) (struct qed_chain * p_chain,
+						   void
+						   *p_element,
+						   char
+						   *buffer),
+		    int (*func_ptr_print_metadata) (struct qed_chain * p_chain,
+						    char *buffer))
+{
+	int pos = 0;
+	int rc = 0;
+
+	/* if print_to_kernel set, it will not print in buffer */
+	if (print_to_kernel) {
+		rc = qed_chain_print_to_kernel(p_chain, element_indx,
+					       stop_indx);
 		return rc;
 	}
 
-	qed_chain_init(chain, params, page_cnt);
+	/* if file pointers are empty point to default functions */
+	if (!func_ptr_print_element)
+		func_ptr_print_element = qed_chain_print_element_raw;
+	if (!func_ptr_print_metadata)
+		func_ptr_print_metadata = qed_chain_print_metadata_raw;
 
-	switch (params->mode) {
-	case QED_CHAIN_MODE_NEXT_PTR:
-		rc = qed_chain_alloc_next_ptr(cdev, chain);
-		break;
-	case QED_CHAIN_MODE_SINGLE:
-		rc = qed_chain_alloc_single(cdev, chain);
-		break;
-	case QED_CHAIN_MODE_PBL:
-		rc = qed_chain_alloc_pbl(cdev, chain);
-		break;
-	default:
-		return -EINVAL;
+	if (print_metadata) {
+		if (MAX_PRINT_METADATA_SIZE < buffer_size) {
+			pos += func_ptr_print_metadata(p_chain, buffer);
+		} else {
+			pr_err
+			    ("Failed to copy Metadata to buffer, buffer is too small\n");
+			return -1;
+		}
 	}
 
-	if (!rc)
-		return 0;
-
-	qed_chain_free(cdev, chain);
+	/* print the elements to the buffer */
+	rc = qed_chain_print_to_buff(p_chain, buffer + pos,
+				     func_ptr_print_element, element_indx,
+				     stop_indx, buffer_size);
 
 	return rc;
 }

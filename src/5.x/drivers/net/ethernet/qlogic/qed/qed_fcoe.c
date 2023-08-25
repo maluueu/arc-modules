@@ -1,7 +1,33 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include <linux/types.h>
@@ -17,26 +43,30 @@
 #include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <linux/workqueue.h>
+#include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #define __PREVENT_DUMP_MEM_ARR__
 #define __PREVENT_PXP_GLOBAL_WIN__
 #include "qed.h"
+#include "qed_compat.h"
 #include "qed_cxt.h"
 #include "qed_dev_api.h"
 #include "qed_fcoe.h"
+#include "qed_fcoe_if.h"
 #include "qed_hsi.h"
 #include "qed_hw.h"
 #include "qed_int.h"
+#include "qed_iro_hsi.h"
 #include "qed_ll2.h"
 #include "qed_mcp.h"
 #include "qed_reg_addr.h"
 #include "qed_sp.h"
 #include "qed_sriov.h"
-#include <linux/qed/qed_fcoe_if.h>
-
+#include "qed_fcoe_if.h"
 struct qed_fcoe_conn {
 	struct list_head list_entry;
 	bool free_on_delete;
@@ -81,6 +111,9 @@ struct qed_fcoe_conn {
 	u8 def_q_idx;
 };
 
+#define TSTORM_FCOE_CONN_AG_CTX_DUMMY_TIMER_CF_EN_MASK  0x1
+#define TSTORM_FCOE_CONN_AG_CTX_DUMMY_TIMER_CF_EN_SHIFT 4
+
 static int
 qed_sp_fcoe_func_start(struct qed_hwfn *p_hwfn,
 		       enum spq_mode comp_mode,
@@ -89,14 +122,14 @@ qed_sp_fcoe_func_start(struct qed_hwfn *p_hwfn,
 	struct qed_fcoe_pf_params *fcoe_pf_params = NULL;
 	struct fcoe_init_ramrod_params *p_ramrod = NULL;
 	struct fcoe_init_func_ramrod_data *p_data;
-	struct e4_fcoe_conn_context *p_cxt = NULL;
 	struct qed_spq_entry *p_ent = NULL;
+	u32 dummy_cid, fcoe_conn_context_size;
 	struct qed_sp_init_data init_data;
+	struct fcoe_conn_context *p_cxt;
 	struct qed_cxt_info cxt_info;
-	u32 dummy_cid;
+	u8 i, num_sbs, *p_flags3;
 	int rc = 0;
-	__le16 tmp;
-	u8 i;
+	u16 tmp;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -140,13 +173,17 @@ qed_sp_fcoe_func_start(struct qed_hwfn *p_hwfn,
 			  dummy_cid);
 		goto err;
 	}
+
 	p_cxt = cxt_info.p_cxt;
-	memset(p_cxt, 0, sizeof(*p_cxt));
+	fcoe_conn_context_size = sizeof(*p_cxt);
+	p_flags3 = &p_cxt->tstorm_ag_context.flags3;
 
-	SET_FIELD(p_cxt->tstorm_ag_context.flags3,
-		  E4_TSTORM_FCOE_CONN_AG_CTX_DUMMY_TIMER_CF_EN, 1);
+	/* @@@TBD we zero the context until we have ilt_reset implemented. */
+	memset(p_cxt, 0, fcoe_conn_context_size);
 
-	fcoe_pf_params->dummy_icid = (u16)dummy_cid;
+	SET_FIELD(*p_flags3, TSTORM_FCOE_CONN_AG_CTX_DUMMY_TIMER_CF_EN, 1);
+
+	fcoe_pf_params->dummy_icid = (u16) dummy_cid;
 
 	tmp = cpu_to_le16(fcoe_pf_params->num_tasks);
 	p_data->func_params.num_tasks = tmp;
@@ -162,40 +199,48 @@ qed_sp_fcoe_func_start(struct qed_hwfn *p_hwfn,
 	tmp = cpu_to_le16(fcoe_pf_params->cmdq_num_entries);
 	p_data->q_params.cmdq_num_entries = tmp;
 
-	p_data->q_params.num_queues = fcoe_pf_params->num_cqs;
+	tmp = fcoe_pf_params->num_cqs;
+	p_data->q_params.num_queues = (u8) tmp;
 
-	tmp = (__force __le16)p_hwfn->hw_info.resc_start[QED_CMDQS_CQS];
-	p_data->q_params.queue_relative_offset = (__force u8)tmp;
+	tmp = (u16) p_hwfn->hw_info.resc_start[QED_CMDQS_CQS];
+	p_data->q_params.queue_relative_offset = (u8) tmp;
 
-	for (i = 0; i < fcoe_pf_params->num_cqs; i++) {
-		tmp = cpu_to_le16(qed_get_igu_sb_id(p_hwfn, i));
+	/* In storage target each CQ/CmdQ pair uses a single SB */
+	num_sbs = fcoe_pf_params->num_cqs;
+	if (fcoe_pf_params->is_target)
+		num_sbs /= 2;
+	for (i = 0; i < num_sbs; i++) {
+		u16 igu_sb_id;
+
+		igu_sb_id = qed_get_igu_sb_id(p_hwfn, i);
+		tmp = cpu_to_le16(igu_sb_id);
 		p_data->q_params.cq_cmdq_sb_num_arr[i] = tmp;
 	}
 
 	p_data->q_params.cq_sb_pi = fcoe_pf_params->gl_rq_pi;
 	p_data->q_params.cmdq_sb_pi = fcoe_pf_params->gl_cmd_pi;
 
-	p_data->q_params.bdq_resource_id = (u8)RESC_START(p_hwfn, QED_BDQ);
+	p_data->q_params.storage_func_id = (u8) RESC_START(p_hwfn, QED_BDQ);
 
 	DMA_REGPAIR_LE(p_data->q_params.bdq_pbl_base_address[BDQ_ID_RQ],
 		       fcoe_pf_params->bdq_pbl_base_addr[BDQ_ID_RQ]);
 	p_data->q_params.bdq_pbl_num_entries[BDQ_ID_RQ] =
 	    fcoe_pf_params->bdq_pbl_num_entries[BDQ_ID_RQ];
-	tmp = cpu_to_le16(fcoe_pf_params->bdq_xoff_threshold[BDQ_ID_RQ]);
-	p_data->q_params.bdq_xoff_threshold[BDQ_ID_RQ] = tmp;
-	tmp = cpu_to_le16(fcoe_pf_params->bdq_xon_threshold[BDQ_ID_RQ]);
-	p_data->q_params.bdq_xon_threshold[BDQ_ID_RQ] = tmp;
+	tmp = fcoe_pf_params->bdq_xoff_threshold[BDQ_ID_RQ];
+	p_data->q_params.bdq_xoff_threshold[BDQ_ID_RQ] = cpu_to_le16(tmp);
+	tmp = fcoe_pf_params->bdq_xon_threshold[BDQ_ID_RQ];
+	p_data->q_params.bdq_xon_threshold[BDQ_ID_RQ] = cpu_to_le16(tmp);
 
 	DMA_REGPAIR_LE(p_data->q_params.bdq_pbl_base_address[BDQ_ID_IMM_DATA],
 		       fcoe_pf_params->bdq_pbl_base_addr[BDQ_ID_IMM_DATA]);
 	p_data->q_params.bdq_pbl_num_entries[BDQ_ID_IMM_DATA] =
 	    fcoe_pf_params->bdq_pbl_num_entries[BDQ_ID_IMM_DATA];
-	tmp = cpu_to_le16(fcoe_pf_params->bdq_xoff_threshold[BDQ_ID_IMM_DATA]);
-	p_data->q_params.bdq_xoff_threshold[BDQ_ID_IMM_DATA] = tmp;
-	tmp = cpu_to_le16(fcoe_pf_params->bdq_xon_threshold[BDQ_ID_IMM_DATA]);
-	p_data->q_params.bdq_xon_threshold[BDQ_ID_IMM_DATA] = tmp;
-	tmp = cpu_to_le16(fcoe_pf_params->rq_buffer_size);
-	p_data->q_params.rq_buffer_size = tmp;
+	tmp = fcoe_pf_params->bdq_xoff_threshold[BDQ_ID_IMM_DATA];
+	p_data->q_params.bdq_xoff_threshold[BDQ_ID_IMM_DATA] = cpu_to_le16(tmp);
+	tmp = fcoe_pf_params->bdq_xon_threshold[BDQ_ID_IMM_DATA];
+	p_data->q_params.bdq_xon_threshold[BDQ_ID_IMM_DATA] = cpu_to_le16(tmp);
+	tmp = fcoe_pf_params->rq_buffer_size;
+	p_data->q_params.rq_buffer_size = cpu_to_le16(tmp);
 
 	if (fcoe_pf_params->is_target) {
 		SET_FIELD(p_data->q_params.q_validity,
@@ -229,8 +274,7 @@ qed_sp_fcoe_conn_offload(struct qed_hwfn *p_hwfn,
 	struct fcoe_conn_offload_ramrod_data *p_data;
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	u16 physical_q0;
-	__le16 tmp;
+	u16 physical_q0, tmp;
 	int rc;
 
 	/* Get SPQ entry */
@@ -251,7 +295,7 @@ qed_sp_fcoe_conn_offload(struct qed_hwfn *p_hwfn,
 
 	/* Transmission PQ is the first of the PF */
 	physical_q0 = qed_get_cm_pq_idx(p_hwfn, PQ_FLAGS_OFLD);
-	p_conn->physical_q0 = physical_q0;
+	p_conn->physical_q0 = cpu_to_le16(physical_q0);
 	p_data->physical_q0 = cpu_to_le16(physical_q0);
 
 	p_data->conn_id = cpu_to_le16(p_conn->conn_id);
@@ -402,7 +446,7 @@ qed_fcoe_allocate_connection(struct qed_hwfn *p_hwfn,
 		p_conn->xferq_addr_virt_addr[i] = p_addr;
 
 		p_addr = p_conn->xferq_pbl_addr_virt_addr;
-		((dma_addr_t *)p_addr)[i] = p_conn->xferq_addr[i];
+		((dma_addr_t *) p_addr)[i] = p_conn->xferq_addr[i];
 	}
 
 	p_addr = dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
@@ -421,15 +465,14 @@ qed_fcoe_allocate_connection(struct qed_hwfn *p_hwfn,
 		p_conn->confq_addr_virt_addr[i] = p_addr;
 
 		p_addr = p_conn->confq_pbl_addr_virt_addr;
-		((dma_addr_t *)p_addr)[i] = p_conn->confq_addr[i];
+		((dma_addr_t *) p_addr)[i] = p_conn->confq_addr[i];
 	}
 
 	p_conn->free_on_delete = true;
 	*p_out_conn = p_conn;
 	return 0;
 
-nomem_confq:
-	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+nomem_confq:dma_free_coherent(&p_hwfn->cdev->pdev->dev,
 			  QED_CHAIN_PAGE_SIZE,
 			  p_conn->confq_pbl_addr_virt_addr,
 			  p_conn->confq_pbl_addr);
@@ -439,8 +482,7 @@ nomem_confq:
 					  QED_CHAIN_PAGE_SIZE,
 					  p_conn->confq_addr_virt_addr[i],
 					  p_conn->confq_addr[i]);
-nomem_xferq:
-	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+nomem_xferq:dma_free_coherent(&p_hwfn->cdev->pdev->dev,
 			  QED_CHAIN_PAGE_SIZE,
 			  p_conn->xferq_pbl_addr_virt_addr,
 			  p_conn->xferq_pbl_addr);
@@ -492,24 +534,23 @@ static void qed_fcoe_free_connection(struct qed_hwfn *p_hwfn,
 				  p_conn->xferq_addr_virt_addr[i],
 				  p_conn->xferq_addr[i]);
 	}
+
 	kfree(p_conn);
 }
 
 static void __iomem *qed_fcoe_get_db_addr(struct qed_hwfn *p_hwfn, u32 cid)
 {
-	return (u8 __iomem *)p_hwfn->doorbells +
-	       qed_db_addr(cid, DQ_DEMS_LEGACY);
+	return (u8 __iomem *) p_hwfn->doorbells + DB_ADDR(cid, DQ_DEMS_LEGACY);
 }
 
 static void __iomem *qed_fcoe_get_primary_bdq_prod(struct qed_hwfn *p_hwfn,
 						   u8 bdq_id)
 {
 	if (RESC_NUM(p_hwfn, QED_BDQ)) {
-		return (u8 __iomem *)p_hwfn->regview +
-		       GTT_BAR0_MAP_REG_MSDM_RAM +
-		       MSTORM_SCSI_BDQ_EXT_PROD_OFFSET(RESC_START(p_hwfn,
-								  QED_BDQ),
-						       bdq_id);
+		return (u8 __iomem *) p_hwfn->regview +
+		    GET_GTT_BDQ_REG_ADDR(GTT_BAR0_MAP_REG_MSDM_RAM,
+					 MSTORM_SCSI_BDQ_EXT_PROD,
+					 RESC_START(p_hwfn, QED_BDQ), bdq_id);
 	} else {
 		DP_NOTICE(p_hwfn, "BDQ is not allocated!\n");
 		return NULL;
@@ -520,11 +561,10 @@ static void __iomem *qed_fcoe_get_secondary_bdq_prod(struct qed_hwfn *p_hwfn,
 						     u8 bdq_id)
 {
 	if (RESC_NUM(p_hwfn, QED_BDQ)) {
-		return (u8 __iomem *)p_hwfn->regview +
-		       GTT_BAR0_MAP_REG_TSDM_RAM +
-		       TSTORM_SCSI_BDQ_EXT_PROD_OFFSET(RESC_START(p_hwfn,
-								  QED_BDQ),
-						       bdq_id);
+		return (u8 __iomem *) p_hwfn->regview +
+		    GET_GTT_BDQ_REG_ADDR(GTT_BAR0_MAP_REG_TSDM_RAM,
+					 TSTORM_SCSI_BDQ_EXT_PROD,
+					 RESC_START(p_hwfn, QED_BDQ), bdq_id);
 	} else {
 		DP_NOTICE(p_hwfn, "BDQ is not allocated!\n");
 		return NULL;
@@ -541,16 +581,22 @@ int qed_fcoe_alloc(struct qed_hwfn *p_hwfn)
 		DP_NOTICE(p_hwfn, "Failed to allocate qed_fcoe_info'\n");
 		return -ENOMEM;
 	}
+
 	INIT_LIST_HEAD(&p_fcoe_info->free_list);
 
 	p_hwfn->p_fcoe_info = p_fcoe_info;
 	return 0;
 }
 
+#define TSTORM_FCOE_TASK_AG_CTX_CONNECTION_TYPE_MASK    0xF
+#define TSTORM_FCOE_TASK_AG_CTX_CONNECTION_TYPE_SHIFT   0
+
 void qed_fcoe_setup(struct qed_hwfn *p_hwfn)
 {
-	struct e4_fcoe_task_context *p_task_ctx = NULL;
-	u32 i, lc;
+	struct fcoe_task_context *p_task_ctx = NULL;
+	__le32 *p_logical_client_0, *p_logical_client_1;
+	u32 i, fcoe_task_context_size;
+	u8 *p_flags0;
 	int rc;
 
 	spin_lock_init(&p_hwfn->p_fcoe_info->lock);
@@ -561,18 +607,18 @@ void qed_fcoe_setup(struct qed_hwfn *p_hwfn)
 		if (rc)
 			continue;
 
-		memset(p_task_ctx, 0, sizeof(struct e4_fcoe_task_context));
+		fcoe_task_context_size = sizeof(*p_task_ctx);
+		p_logical_client_0 =
+		    &p_task_ctx->timer_context.logical_client_0;
+		p_logical_client_1 =
+		    &p_task_ctx->timer_context.logical_client_1;
+		p_flags0 = &p_task_ctx->tstorm_ag_context.flags0;
 
-		lc = 0;
-		SET_FIELD(lc, TIMERS_CONTEXT_VALIDLC0, 1);
-		p_task_ctx->timer_context.logical_client_0 = cpu_to_le32(lc);
-
-		lc = 0;
-		SET_FIELD(lc, TIMERS_CONTEXT_VALIDLC1, 1);
-		p_task_ctx->timer_context.logical_client_1 = cpu_to_le32(lc);
-
-		SET_FIELD(p_task_ctx->tstorm_ag_context.flags0,
-			  E4_TSTORM_FCOE_TASK_AG_CTX_CONNECTION_TYPE, 1);
+		memset(p_task_ctx, 0, fcoe_task_context_size);
+		SET_FIELD(*p_logical_client_0, TIMERS_CONTEXT_VALIDLC0, 1);
+		SET_FIELD(*p_logical_client_1, TIMERS_CONTEXT_VALIDLC1, 1);
+		SET_FIELD(*p_flags0, TSTORM_FCOE_TASK_AG_CTX_CONNECTION_TYPE,
+			  1);
 	}
 }
 
@@ -586,7 +632,7 @@ void qed_fcoe_free(struct qed_hwfn *p_hwfn)
 	while (!list_empty(&p_hwfn->p_fcoe_info->free_list)) {
 		p_conn = list_first_entry(&p_hwfn->p_fcoe_info->free_list,
 					  struct qed_fcoe_conn, list_entry);
-		if (!p_conn)
+		if (p_conn == NULL)
 			break;
 		list_del(&p_conn->list_entry);
 		qed_fcoe_free_connection(p_hwfn, p_conn);
@@ -693,8 +739,8 @@ static void _qed_fcoe_get_pstats(struct qed_hwfn *p_hwfn,
 	    HILO_64_REGPAIR(pstats.fcoe_tx_other_pkt_cnt);
 }
 
-static int qed_fcoe_get_stats(struct qed_hwfn *p_hwfn,
-			      struct qed_fcoe_stats *p_stats)
+static int
+qed_fcoe_get_stats(struct qed_hwfn *p_hwfn, struct qed_fcoe_stats *p_stats)
 {
 	struct qed_ptt *p_ptt;
 
@@ -749,15 +795,41 @@ static void qed_register_fcoe_ops(struct qed_dev *cdev,
 	cdev->ops_cookie = cookie;
 }
 
+int qed_get_fcoe_capabilities(struct qed_dev *cdev,
+			      struct qed_fcoe_caps *p_caps)
+{
+	struct qed_fcoe_cb_ops *ops = cdev->protocol_ops.fcoe;
+	void *cookie = cdev->ops_cookie;
+
+	if (!ops || !cookie)
+		return -EINVAL;
+
+	if (!ops->get_fcoe_capabilities)
+		return -EOPNOTSUPP;
+
+	return ops->get_fcoe_capabilities(cookie, p_caps);
+}
+
 static struct qed_hash_fcoe_con *qed_fcoe_get_hash(struct qed_dev *cdev,
 						   u32 handle)
 {
 	struct qed_hash_fcoe_con *hash_con = NULL;
 
+#ifdef _HAS_HASH_FOR_EACH_POSSIBLE_V1	/* ! QED_UPSTREAM */
+	struct hlist_node *hn;
+#endif
+
 	if (!(cdev->flags & QED_FLAG_STORAGE_STARTED))
 		return NULL;
 
+	/* TODO - currently assume one-pending via API; If not true, need
+	 * to add a lock around connections
+	 */
+#ifndef _HAS_HASH_FOR_EACH_POSSIBLE_V1	/* QED_UPSTREAM */
 	hash_for_each_possible(cdev->connections, hash_con, node, handle) {
+#else
+	hash_for_each_possible(cdev->connections, hash_con, hn, node, handle) {
+#endif
 		if (hash_con->con->icid == handle)
 			break;
 	}
@@ -848,8 +920,8 @@ static int qed_fcoe_start(struct qed_dev *cdev, struct qed_fcoe_tid *tasks)
 }
 
 static int qed_fcoe_acquire_conn(struct qed_dev *cdev,
-				 u32 *handle,
-				 u32 *fw_cid, void __iomem **p_doorbell)
+				 u32 * handle,
+				 u32 * fw_cid, void __iomem ** p_doorbell)
 {
 	struct qed_hash_fcoe_con *hash_con;
 	int rc;
@@ -994,11 +1066,11 @@ void qed_get_protocol_stats_fcoe(struct qed_dev *cdev,
 
 	/* Translate FW statistics into struct */
 	stats->rx_pkts = proto_stats.fcoe_rx_data_pkt_cnt +
-			 proto_stats.fcoe_rx_xfer_pkt_cnt +
-			 proto_stats.fcoe_rx_other_pkt_cnt;
+	    proto_stats.fcoe_rx_xfer_pkt_cnt +
+	    proto_stats.fcoe_rx_other_pkt_cnt;
 	stats->tx_pkts = proto_stats.fcoe_tx_data_pkt_cnt +
-			 proto_stats.fcoe_tx_xfer_pkt_cnt +
-			 proto_stats.fcoe_tx_other_pkt_cnt;
+	    proto_stats.fcoe_tx_xfer_pkt_cnt +
+	    proto_stats.fcoe_tx_other_pkt_cnt;
 	stats->fcs_err = proto_stats.fcoe_silent_drop_pkt_crc_error_cnt;
 
 	/* Request protocol driver to fill-in the rest */
@@ -1011,27 +1083,102 @@ void qed_get_protocol_stats_fcoe(struct qed_dev *cdev,
 	}
 }
 
+static int qed_get_fc_npiv(struct qed_dev *cdev, struct qed_fc_npiv_tbl *table)
+{
+	struct qed_hwfn *hwfn = QED_AFFIN_HWFN(cdev);
+	struct qed_ptt *ptt;
+	int rc;
+
+	ptt = qed_ptt_acquire(hwfn);
+	if (!ptt) {
+		DP_NOTICE(hwfn, "Can't acquire PTT\n");
+		return -EAGAIN;
+	}
+
+	rc = qed_mcp_ov_get_fc_npiv(hwfn, ptt, table);
+
+	qed_ptt_release(hwfn, ptt);
+
+	return rc;
+}
+
+static int qed_update_fcoe_cvid(struct qed_dev *cdev, u16 vlan)
+{
+	struct qed_hwfn *hwfn = QED_AFFIN_HWFN(cdev);
+	struct qed_ptt *ptt;
+	int rc;
+
+	ptt = qed_ptt_acquire(hwfn);
+	if (!ptt) {
+		DP_NOTICE(hwfn, "Can't acquire PTT\n");
+		return -EAGAIN;
+	}
+
+	rc = qed_mcp_update_fcoe_cvid(hwfn, ptt, vlan);
+
+	qed_ptt_release(hwfn, ptt);
+
+	return rc;
+}
+
+static int qed_update_fcoe_fabric_name(struct qed_dev *cdev, u8 * wwn)
+{
+	struct qed_hwfn *hwfn = QED_AFFIN_HWFN(cdev);
+	struct qed_ptt *ptt;
+	int rc;
+
+	ptt = qed_ptt_acquire(hwfn);
+	if (!ptt) {
+		DP_NOTICE(hwfn, "Can't acquire PTT\n");
+		return -EAGAIN;
+	}
+
+	rc = qed_mcp_update_fcoe_fabric_name(hwfn, ptt, wwn);
+
+	qed_ptt_release(hwfn, ptt);
+
+	return rc;
+}
+
 static const struct qed_fcoe_ops qed_fcoe_ops_pass = {
-	.common = &qed_common_ops_pass,
-	.ll2 = &qed_ll2_ops_pass,
-	.fill_dev_info = &qed_fill_fcoe_dev_info,
-	.start = &qed_fcoe_start,
-	.stop = &qed_fcoe_stop,
-	.register_ops = &qed_register_fcoe_ops,
-	.acquire_conn = &qed_fcoe_acquire_conn,
-	.release_conn = &qed_fcoe_release_conn,
-	.offload_conn = &qed_fcoe_offload_conn,
-	.destroy_conn = &qed_fcoe_destroy_conn,
-	.get_stats = &qed_fcoe_stats,
+	INIT_STRUCT_FIELD(common, &qed_common_ops_pass),
+	INIT_STRUCT_FIELD(ll2, &qed_ll2_ops_pass),
+	INIT_STRUCT_FIELD(fill_dev_info, &qed_fill_fcoe_dev_info),
+	INIT_STRUCT_FIELD(start, &qed_fcoe_start),
+	INIT_STRUCT_FIELD(stop, &qed_fcoe_stop),
+	INIT_STRUCT_FIELD(register_ops, &qed_register_fcoe_ops),
+	INIT_STRUCT_FIELD(acquire_conn, &qed_fcoe_acquire_conn),
+	INIT_STRUCT_FIELD(release_conn, &qed_fcoe_release_conn),
+	INIT_STRUCT_FIELD(offload_conn, &qed_fcoe_offload_conn),
+	INIT_STRUCT_FIELD(destroy_conn, &qed_fcoe_destroy_conn),
+	INIT_STRUCT_FIELD(get_stats, &qed_fcoe_stats),
+	INIT_STRUCT_FIELD(get_fc_npiv, &qed_get_fc_npiv),
+	INIT_STRUCT_FIELD(update_fcoe_cvid, &qed_update_fcoe_cvid),
+	INIT_STRUCT_FIELD(update_fcoe_fabric_name,
+			  &qed_update_fcoe_fabric_name),
 };
 
+#ifdef QED_UPSTREAM
 const struct qed_fcoe_ops *qed_get_fcoe_ops(void)
 {
 	return &qed_fcoe_ops_pass;
 }
+#else
+const struct qed_fcoe_ops *qed_get_fcoe_ops(u32 version)
+{
+	if (version != QED_FCOE_INTERFACE_VERSION) {
+		pr_notice("Cannot supply ethtool operations [%08x != %08x]\n",
+			  version, QED_FCOE_INTERFACE_VERSION);
+		return NULL;
+	}
+	return &qed_fcoe_ops_pass;
+}
+#endif
 EXPORT_SYMBOL(qed_get_fcoe_ops);
 
 void qed_put_fcoe_ops(void)
 {
+	/* TODO - reference count for module? */
 }
+
 EXPORT_SYMBOL(qed_put_fcoe_ops);

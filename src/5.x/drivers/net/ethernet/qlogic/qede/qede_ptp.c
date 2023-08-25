@@ -1,12 +1,45 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* QLogic qede NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
+
+#if (defined(QEDE_PTP_SUPPORT) && \
+	(defined(CONFIG_PTP_1588_CLOCK) || \
+	defined(CONFIG_PTP_1588_CLOCK_MODULE)))	/* QEDE_UPSTREAM */
 
 #include "qede_ptp.h"
 #define QEDE_PTP_TX_TIMEOUT (2 * HZ)
 
+/* ptp spinlock is used for protecting the cycle/time counter fields and also,
+ * for serializing the qed PTP API invocations.
+ */
 struct qede_ptp {
 	const struct qed_eth_ptp_ops	*ops;
 	struct ptp_clock_info		clock_info;
@@ -28,12 +61,12 @@ struct qede_ptp {
 };
 
 /**
- * qede_ptp_adjfreq() - Adjust the frequency of the PTP cycle counter.
+ * qede_ptp_adjfreq
+ * @ptp: the ptp clock structure
+ * @ppb: parts per billion adjustment from base
  *
- * @info: The PTP clock info structure.
- * @ppb: Parts per billion adjustment from base.
- *
- * Return: Zero on success, negative errno otherwise.
+ * Adjust the frequency of the ptp cycle counter by the
+ * indicated ppb from the base frequency.
  */
 static int qede_ptp_adjfreq(struct ptp_clock_info *info, s32 ppb)
 {
@@ -63,17 +96,32 @@ static int qede_ptp_adjtime(struct ptp_clock_info *info, s64 delta)
 	ptp = container_of(info, struct qede_ptp, clock_info);
 	edev = ptp->edev;
 
-	DP_VERBOSE(edev, QED_MSG_DEBUG, "PTP adjtime called, delta = %llx\n",
-		   delta);
+	DP_VERBOSE(edev, QED_MSG_DEBUG,
+		   "PTP adjtime called, delta = %llx\n", delta);
 
 	spin_lock_bh(&ptp->lock);
+#ifdef _HAS_TIMECOUNTER_ADJTIME	/* QEDE_UPSTREAM */
 	timecounter_adjtime(&ptp->tc, delta);
+#else
+	{
+		u64 now;
+
+		now = timecounter_read(&ptp->tc);
+		now += delta;
+		/* Re-init the timecounter */
+		timecounter_init(&ptp->tc, &ptp->cc, now);
+	}
+#endif
 	spin_unlock_bh(&ptp->lock);
 
 	return 0;
 }
 
+#ifdef _HAS_PTPTIME64 /* QEDE_UPSTREAM */
 static int qede_ptp_gettime(struct ptp_clock_info *info, struct timespec64 *ts)
+#else
+static int qede_ptp_gettime(struct ptp_clock_info *info, struct timespec *ts)
+#endif
 {
 	struct qede_dev *edev;
 	struct qede_ptp *ptp;
@@ -86,15 +134,29 @@ static int qede_ptp_gettime(struct ptp_clock_info *info, struct timespec64 *ts)
 	ns = timecounter_read(&ptp->tc);
 	spin_unlock_bh(&ptp->lock);
 
-	DP_VERBOSE(edev, QED_MSG_DEBUG, "PTP gettime called, ns = %llu\n", ns);
+	DP_VERBOSE(edev, QED_MSG_DEBUG,
+		   "PTP gettime called, ns = %llu\n", ns);
 
+#ifdef _HAS_PTPTIME64 /* QEDE_UPSTREAM */
 	*ts = ns_to_timespec64(ns);
+#else
+	{
+	u32 remainder;
+	ts->tv_sec = div_u64_rem(ns, 1000000000ULL, &remainder);
+	ts->tv_nsec = remainder;
+	}
+#endif
 
 	return 0;
 }
 
+#ifdef _HAS_PTPTIME64		/* QEDE_UPSTREAM */
 static int qede_ptp_settime(struct ptp_clock_info *info,
 			    const struct timespec64 *ts)
+#else
+static int qede_ptp_settime(struct ptp_clock_info *info,
+			    const struct timespec *ts)
+#endif
 {
 	struct qede_dev *edev;
 	struct qede_ptp *ptp;
@@ -105,7 +167,8 @@ static int qede_ptp_settime(struct ptp_clock_info *info,
 
 	ns = timespec64_to_ns(ts);
 
-	DP_VERBOSE(edev, QED_MSG_DEBUG, "PTP settime called, ns = %llu\n", ns);
+	DP_VERBOSE(edev, QED_MSG_DEBUG,
+		   "PTP settime called, ns = %llu\n", ns);
 
 	/* Re-init the timecounter */
 	spin_lock_bh(&ptp->lock);
@@ -142,9 +205,9 @@ static void qede_ptp_task(struct work_struct *work)
 
 	ptp = container_of(work, struct qede_ptp, work);
 	edev = ptp->edev;
+
 	timedout = time_is_before_jiffies(ptp->ptp_tx_start +
 					  QEDE_PTP_TX_TIMEOUT);
-
 	/* Read Tx timestamp registers */
 	spin_lock_bh(&ptp->lock);
 	rc = ptp->ops->read_tx_ts(edev->cdev, &timestamp);
@@ -178,7 +241,11 @@ static void qede_ptp_task(struct work_struct *work)
 }
 
 /* Read the PHC. This API is invoked with ptp_lock held. */
+#ifdef _HAS_REMOVED_CYCLE_T /* QEDE_UPSTREAM */
 static u64 qede_ptp_read_cc(const struct cyclecounter *cc)
+#else
+static cycle_t qede_ptp_read_cc(const struct cyclecounter *cc)
+#endif
 {
 	struct qede_dev *edev;
 	struct qede_ptp *ptp;
@@ -191,7 +258,8 @@ static u64 qede_ptp_read_cc(const struct cyclecounter *cc)
 	if (rc)
 		WARN_ONCE(1, "PHC read err %d\n", rc);
 
-	DP_VERBOSE(edev, QED_MSG_DEBUG, "PHC read cycles = %llu\n", phc_cycles);
+	DP_VERBOSE(edev, QED_MSG_DEBUG,
+		   "PHC read cycles = %llu\n", phc_cycles);
 
 	return phc_cycles;
 }
@@ -222,7 +290,6 @@ static int qede_ptp_cfg_filters(struct qede_dev *edev)
 		break;
 
 	case HWTSTAMP_TX_ONESTEP_SYNC:
-	case HWTSTAMP_TX_ONESTEP_P2P:
 		DP_ERR(edev, "One-step timestamping is not supported\n");
 		return -ERANGE;
 	}
@@ -234,7 +301,6 @@ static int qede_ptp_cfg_filters(struct qede_dev *edev)
 		break;
 	case HWTSTAMP_FILTER_ALL:
 	case HWTSTAMP_FILTER_SOME:
-	case HWTSTAMP_FILTER_NTP_ALL:
 		ptp->rx_filter = HWTSTAMP_FILTER_NONE;
 		rx_filter = QED_PTP_FILTER_ALL;
 		break;
@@ -391,9 +457,11 @@ void qede_ptp_disable(struct qede_dev *edev)
 	}
 
 	/* Disable PTP in HW */
-	spin_lock_bh(&ptp->lock);
-	ptp->ops->disable(edev->cdev);
-	spin_unlock_bh(&ptp->lock);
+	if (!edev->aer_recov_prog) {
+		spin_lock_bh(&ptp->lock);
+		ptp->ops->disable(edev->cdev);
+		spin_unlock_bh(&ptp->lock);
+	}
 
 	kfree(ptp);
 	edev->ptp = NULL;
@@ -420,7 +488,7 @@ static int qede_ptp_init(struct qede_dev *edev)
 	/* Init work queue for Tx timestamping */
 	INIT_WORK(&ptp->work, qede_ptp_task);
 
-	/* Init cyclecounter and timecounter */
+	/* Init cyclecounter and timecounter. */
 	memset(&ptp->cc, 0, sizeof(ptp->cc));
 	ptp->cc.read = qede_ptp_read_cc;
 	ptp->cc.mask = CYCLECOUNTER_MASK(64);
@@ -429,7 +497,7 @@ static int qede_ptp_init(struct qede_dev *edev)
 
 	timecounter_init(&ptp->tc, &ptp->cc, ktime_to_ns(ktime_get_real()));
 
-	return 0;
+	return rc;
 }
 
 int qede_ptp_enable(struct qede_dev *edev)
@@ -469,23 +537,29 @@ int qede_ptp_enable(struct qede_dev *edev)
 	ptp->clock_info.pps = 0;
 	ptp->clock_info.adjfreq = qede_ptp_adjfreq;
 	ptp->clock_info.adjtime = qede_ptp_adjtime;
+#ifdef _HAS_PTPTIME64 /* QEDE_UPSTREAM */
 	ptp->clock_info.gettime64 = qede_ptp_gettime;
 	ptp->clock_info.settime64 = qede_ptp_settime;
+#else
+	ptp->clock_info.gettime = qede_ptp_gettime;
+	ptp->clock_info.settime = qede_ptp_settime;
+#endif
 	ptp->clock_info.enable = qede_ptp_ancillary_feature_enable;
 
 	ptp->clock = ptp_clock_register(&ptp->clock_info, &edev->pdev->dev);
 	if (IS_ERR(ptp->clock)) {
-		DP_ERR(edev, "PTP clock registration failed\n");
-		qede_ptp_disable(edev);
 		rc = -EINVAL;
+		DP_ERR(edev, "PTP clock registeration failed\n");
 		goto err2;
 	}
 
 	return 0;
 
+err2:
+	qede_ptp_disable(edev);
+	ptp->clock = NULL;
 err1:
 	kfree(ptp);
-err2:
 	edev->ptp = NULL;
 
 	return rc;
@@ -550,3 +624,4 @@ void qede_ptp_rx_ts(struct qede_dev *edev, struct sk_buff *skb)
 		   "Rx timestamp, timestamp cycles = %llu, ns = %llu\n",
 		   timestamp, ns);
 }
+#endif /* QEDE_PTP_SUPPORT */

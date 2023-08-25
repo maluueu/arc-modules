@@ -8,3 +8,6 @@ obj-$(CONFIG_QLCNIC) += qlcnic/
 obj-$(CONFIG_NETXEN_NIC) += netxen/
 obj-$(CONFIG_QED) += qed/
 obj-$(CONFIG_QEDE)+= qede/
+obj-$(CONFIG_QEDF)+= qedf/
+obj-$(CONFIG_QEDI)+= qedi/
+obj-$(CONFIG_QEDR)+= qedr/

@@ -1,27 +1,53 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include <linux/types.h>
+#include <linux/kernel.h>
+#define __PREVENT_DUMP_MEM_ARR__
+#define __PREVENT_PXP_GLOBAL_WIN__
 #include "qed.h"
 #include "qed_dev_api.h"
 #include "qed_hw.h"
 #include "qed_l2.h"
 #include "qed_mcp.h"
-#include "qed_ptp.h"
 #include "qed_reg_addr.h"
 
 /* 16 nano second time quantas to wait before making a Drift adjustment */
-#define QED_DRIFT_CNTR_TIME_QUANTA_SHIFT	0
+#define QED_DRIFT_CNTR_TIME_QUANTA_SHIFT    0
 /* Nano seconds to add/subtract when making a Drift adjustment */
-#define QED_DRIFT_CNTR_ADJUSTMENT_SHIFT		28
+#define QED_DRIFT_CNTR_ADJUSTMENT_SHIFT     28
 /* Add/subtract the Adjustment_Value when making a Drift adjustment */
-#define QED_DRIFT_CNTR_DIRECTION_SHIFT		31
-#define QED_TIMESTAMP_MASK			BIT(16)
-/* Param mask for Hardware to detect/timestamp the L2/L4 unicast PTP packets */
-#define QED_PTP_UCAST_PARAM_MASK              0x70F
+#define QED_DRIFT_CNTR_DIRECTION_SHIFT      31
+#define QED_TIMESTAMP_MASK                    0x10000
 
 static enum qed_resc_lock qed_ptcdev_to_resc(struct qed_hwfn *p_hwfn)
 {
@@ -52,9 +78,9 @@ static int qed_ptp_res_lock(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 	qed_mcp_resc_lock_default_init(&params, NULL, resource, true);
 
 	rc = qed_mcp_resc_lock(p_hwfn, p_ptt, &params);
-	if (rc && rc != -EINVAL) {
+	if (rc != 0 && rc != -EOPNOTSUPP) {
 		return rc;
-	} else if (rc == -EINVAL) {
+	} else if (rc == -EOPNOTSUPP) {
 		/* MFW doesn't support resource locking, first PF on the port
 		 * has lock ownership.
 		 */
@@ -63,7 +89,7 @@ static int qed_ptp_res_lock(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 
 		DP_INFO(p_hwfn, "PF doesn't have lock ownership\n");
 		return -EBUSY;
-	} else if (!rc && !params.b_granted) {
+	} else if (rc == 0 && !params.b_granted) {
 		DP_INFO(p_hwfn, "Failed to acquire ptp resource lock\n");
 		return -EBUSY;
 	}
@@ -84,7 +110,7 @@ static int qed_ptp_res_unlock(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 	qed_mcp_resc_lock_default_init(NULL, &params, resource, true);
 
 	rc = qed_mcp_resc_unlock(p_hwfn, p_ptt, &params);
-	if (rc == -EINVAL) {
+	if (rc == -EOPNOTSUPP) {
 		/* MFW doesn't support locking, first PF has lock ownership */
 		if (p_hwfn->abs_pf_id < p_hwfn->cdev->num_ports_in_engine) {
 			rc = 0;
@@ -100,7 +126,7 @@ static int qed_ptp_res_unlock(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 }
 
 /* Read Rx timestamp */
-static int qed_ptp_hw_read_rx_ts(struct qed_dev *cdev, u64 *timestamp)
+static int qed_ptp_hw_read_rx_ts(struct qed_dev *cdev, u64 * timestamp)
 {
 	struct qed_hwfn *p_hwfn = QED_LEADING_HWFN(cdev);
 	struct qed_ptt *p_ptt = p_hwfn->p_ptp_ptt;
@@ -109,7 +135,8 @@ static int qed_ptp_hw_read_rx_ts(struct qed_dev *cdev, u64 *timestamp)
 	*timestamp = 0;
 	val = qed_rd(p_hwfn, p_ptt, NIG_REG_LLH_PTP_HOST_BUF_SEQID);
 	if (!(val & QED_TIMESTAMP_MASK)) {
-		DP_INFO(p_hwfn, "Invalid Rx timestamp, buf_seqid = %d\n", val);
+		DP_INFO(p_hwfn,
+			"Invalid Rx timestamp, but seqid = %08x\n", val);
 		return -EINVAL;
 	}
 
@@ -126,7 +153,7 @@ static int qed_ptp_hw_read_rx_ts(struct qed_dev *cdev, u64 *timestamp)
 }
 
 /* Read Tx timestamp */
-static int qed_ptp_hw_read_tx_ts(struct qed_dev *cdev, u64 *timestamp)
+static int qed_ptp_hw_read_tx_ts(struct qed_dev *cdev, u64 * timestamp)
 {
 	struct qed_hwfn *p_hwfn = QED_LEADING_HWFN(cdev);
 	struct qed_ptt *p_ptt = p_hwfn->p_ptp_ptt;
@@ -152,12 +179,13 @@ static int qed_ptp_hw_read_tx_ts(struct qed_dev *cdev, u64 *timestamp)
 }
 
 /* Read Phy Hardware Clock */
-static int qed_ptp_hw_read_cc(struct qed_dev *cdev, u64 *phc_cycles)
+static int qed_ptp_hw_read_cc(struct qed_dev *cdev, u64 * phc_cycles)
 {
 	struct qed_hwfn *p_hwfn = QED_LEADING_HWFN(cdev);
 	struct qed_ptt *p_ptt = p_hwfn->p_ptp_ptt;
 	u32 temp = 0;
 
+	/* Reading of the LSB would latch the MSB until read */
 	temp = qed_rd(p_hwfn, p_ptt, NIG_REG_TSGEN_SYNC_TIME_LSB);
 	*phc_cycles = qed_rd(p_hwfn, p_ptt, NIG_REG_TSGEN_SYNC_TIME_MSB);
 	*phc_cycles <<= 32;
@@ -167,9 +195,10 @@ static int qed_ptp_hw_read_cc(struct qed_dev *cdev, u64 *phc_cycles)
 }
 
 /* Filter PTP protocol packets that need to be timestamped */
-static int qed_ptp_hw_cfg_filters(struct qed_dev *cdev,
-				  enum qed_ptp_filter_type rx_type,
-				  enum qed_ptp_hwtstamp_tx_type tx_type)
+static int
+qed_ptp_hw_cfg_filters(struct qed_dev *cdev,
+		       enum qed_ptp_filter_type rx_type,
+		       enum qed_ptp_hwtstamp_tx_type tx_type)
 {
 	struct qed_hwfn *p_hwfn = QED_LEADING_HWFN(cdev);
 	struct qed_ptt *p_ptt = p_hwfn->p_ptp_ptt;
@@ -221,8 +250,7 @@ static int qed_ptp_hw_cfg_filters(struct qed_dev *cdev,
 		return -EINVAL;
 	}
 
-	qed_wr(p_hwfn, p_ptt, NIG_REG_LLH_PTP_PARAM_MASK,
-	       QED_PTP_UCAST_PARAM_MASK);
+	qed_wr(p_hwfn, p_ptt, NIG_REG_LLH_PTP_PARAM_MASK, 0x70F);
 	qed_wr(p_hwfn, p_ptt, NIG_REG_LLH_PTP_RULE_MASK, rule_mask);
 	qed_wr(p_hwfn, p_ptt, NIG_REG_RX_PTP_EN, enable_cfg);
 
@@ -232,8 +260,7 @@ static int qed_ptp_hw_cfg_filters(struct qed_dev *cdev,
 		qed_wr(p_hwfn, p_ptt, NIG_REG_TX_LLH_PTP_RULE_MASK, 0x3FFF);
 	} else {
 		qed_wr(p_hwfn, p_ptt, NIG_REG_TX_PTP_EN, enable_cfg);
-		qed_wr(p_hwfn, p_ptt, NIG_REG_TX_LLH_PTP_PARAM_MASK,
-		       QED_PTP_UCAST_PARAM_MASK);
+		qed_wr(p_hwfn, p_ptt, NIG_REG_TX_LLH_PTP_PARAM_MASK, 0x70F);
 		qed_wr(p_hwfn, p_ptt, NIG_REG_TX_LLH_PTP_RULE_MASK, rule_mask);
 	}
 
@@ -316,9 +343,10 @@ static int qed_ptp_hw_adjfreq(struct qed_dev *cdev, s32 ppb)
 		best_period = 0xFFFFFFF;
 	}
 
-	drift_ctr_cfg = (best_period << QED_DRIFT_CNTR_TIME_QUANTA_SHIFT) |
-			(((int)best_val) << QED_DRIFT_CNTR_ADJUSTMENT_SHIFT) |
-			(((int)drift_dir) << QED_DRIFT_CNTR_DIRECTION_SHIFT);
+	drift_ctr_cfg =
+	    (u32) ((best_period << QED_DRIFT_CNTR_TIME_QUANTA_SHIFT) |
+		   (((int)best_val) << QED_DRIFT_CNTR_ADJUSTMENT_SHIFT) |
+		   (((int)drift_dir) << QED_DRIFT_CNTR_DIRECTION_SHIFT));
 
 	qed_wr(p_hwfn, p_ptt, NIG_REG_TSGEN_RST_DRIFT_CNTR, 0x1);
 
@@ -343,11 +371,10 @@ static int qed_ptp_hw_enable(struct qed_dev *cdev)
 	int rc;
 
 	p_ptt = qed_ptt_acquire(p_hwfn);
-	if (!p_ptt) {
+	if (p_ptt == NULL) {
 		DP_NOTICE(p_hwfn, "Failed to acquire PTT for PTP\n");
 		return -EBUSY;
 	}
-
 	p_hwfn->p_ptp_ptt = p_ptt;
 
 	rc = qed_ptp_res_lock(p_hwfn, p_ptt);
@@ -383,7 +410,8 @@ static int qed_ptp_hw_enable(struct qed_dev *cdev)
 		qed_wr(p_hwfn, p_ptt, NIG_REG_TIMESYNC_GEN_REG_BB, 4);
 	if (QED_IS_AH(p_hwfn->cdev)) {
 		qed_wr(p_hwfn, p_ptt, NIG_REG_TSGEN_FREECNT_UPDATE_K2, 4);
-		qed_wr(p_hwfn, p_ptt, NIG_REG_PTP_LATCH_OSTS_PKT_TIME, 1);
+		/* Workaround for latching the 2-step PTP packets */
+		qed_wr(p_hwfn, p_ptt, NIG_REG_PTP_LATCH_OSTS_PKT_TIME_K2, 1);
 	}
 
 	/* Disable drift register */
@@ -402,6 +430,9 @@ static int qed_ptp_hw_disable(struct qed_dev *cdev)
 {
 	struct qed_hwfn *p_hwfn = QED_LEADING_HWFN(cdev);
 	struct qed_ptt *p_ptt = p_hwfn->p_ptp_ptt;
+
+	if (p_ptt == NULL)
+		return 0;
 
 	qed_ptp_res_unlock(p_hwfn, p_ptt);
 
@@ -423,11 +454,11 @@ static int qed_ptp_hw_disable(struct qed_dev *cdev)
 }
 
 const struct qed_eth_ptp_ops qed_ptp_ops_pass = {
-	.cfg_filters = qed_ptp_hw_cfg_filters,
-	.read_rx_ts = qed_ptp_hw_read_rx_ts,
-	.read_tx_ts = qed_ptp_hw_read_tx_ts,
-	.read_cc = qed_ptp_hw_read_cc,
-	.adjfreq = qed_ptp_hw_adjfreq,
-	.disable = qed_ptp_hw_disable,
-	.enable = qed_ptp_hw_enable,
+	INIT_STRUCT_FIELD(cfg_filters, qed_ptp_hw_cfg_filters),
+	INIT_STRUCT_FIELD(read_rx_ts, qed_ptp_hw_read_rx_ts),
+	INIT_STRUCT_FIELD(read_tx_ts, qed_ptp_hw_read_tx_ts),
+	INIT_STRUCT_FIELD(read_cc, qed_ptp_hw_read_cc),
+	INIT_STRUCT_FIELD(adjfreq, qed_ptp_hw_adjfreq),
+	INIT_STRUCT_FIELD(disable, qed_ptp_hw_disable),
+	INIT_STRUCT_FIELD(enable, qed_ptp_hw_enable),
 };
