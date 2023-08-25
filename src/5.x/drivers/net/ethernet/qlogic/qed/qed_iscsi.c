@@ -1,7 +1,33 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include <linux/types.h>
@@ -18,24 +44,30 @@
 #include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <linux/workqueue.h>
+#include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
-#include <linux/qed/qed_iscsi_if.h>
+#define __PREVENT_DUMP_MEM_ARR__
+#define __PREVENT_PXP_GLOBAL_WIN__
 #include "qed.h"
+#include "qed_compat.h"
 #include "qed_cxt.h"
 #include "qed_dev_api.h"
 #include "qed_hsi.h"
 #include "qed_hw.h"
 #include "qed_int.h"
+#include "qed_iro_hsi.h"
 #include "qed_iscsi.h"
+#include "qed_iscsi_if.h"
 #include "qed_ll2.h"
 #include "qed_mcp.h"
+#include "qed_reg_addr.h"
 #include "qed_sp.h"
 #include "qed_sriov.h"
-#include "qed_reg_addr.h"
-
+#include "qed_iscsi_if.h"
 struct qed_iscsi_conn {
 	struct list_head list_entry;
 	bool free_on_delete;
@@ -55,6 +87,8 @@ struct qed_iscsi_conn {
 
 	struct tcp_upload_params *tcp_upload_params_virt_addr;
 	dma_addr_t tcp_upload_params_phys_addr;
+	struct iscsi_conn_stats_params *conn_stats_params_virt_addr;
+	dma_addr_t conn_stats_params_phys_addr;
 	struct scsi_terminate_extra_params *queue_cnts_virt_addr;
 	dma_addr_t queue_cnts_phys_addr;
 	dma_addr_t syn_phy_addr;
@@ -105,6 +139,13 @@ struct qed_iscsi_conn {
 	u8 ack_frequency;
 
 	u8 update_flag;
+#define QED_ISCSI_CONN_HD_EN            0x01
+#define QED_ISCSI_CONN_DD_EN            0x02
+#define QED_ISCSI_CONN_INITIAL_R2T      0x04
+#define QED_ISCSI_CONN_IMMEDIATE_DATA   0x08
+#define QED_ISCSI_CONN_DIF_BLOCK_SIZE   0x10
+#define QED_ISCSI_CONN_DIF_ON_HOST_EN   0x20
+
 	u8 default_cq;
 	u32 max_seq_size;
 	u32 max_recv_pdu_length;
@@ -115,13 +156,44 @@ struct qed_iscsi_conn {
 	u16 physical_q0;
 	u16 physical_q1;
 	u8 abortive_dsconnect;
+	u8 dif_on_immediate;
+#define QED_ISCSI_CONN_DIF_ON_IMM_DIS           0
+#define QED_ISCSI_CONN_DIF_ON_IMM_DEFAULT       1
+#define QED_ISCSI_CONN_DIF_ON_IMM_LUN_MAPPER    2
+
+	dma_addr_t lun_mapper_phys_addr;
+	u32 initial_ref_tag;
+	u16 application_tag;
+	u16 application_tag_mask;
+	u8 validate_guard;
+	u8 validate_app_tag;
+	u8 validate_ref_tag;
+	u8 forward_guard;
+	u8 forward_app_tag;
+	u8 forward_ref_tag;
+	u8 interval_size;	/* 0=512B, 1=4KB */
+	u8 network_interface;	/* 0=None, 1=DIF */
+	u8 host_interface;	/* 0=None, 1=DIF, 2=DIX */
+	u8 ref_tag_mask;	/* mask for refernce tag handling */
+	u8 forward_app_tag_with_mask;
+	u8 forward_ref_tag_with_mask;
+
+	u8 ignore_app_tag;
+	u8 initial_ref_tag_is_valid;
+	u8 host_guard_type;	/* 0 = IP checksum, 1 = CRC */
+	u8 protection_type;	/* 1/2/3 - Protection Type */
+	u8 crc_seed;		/* 0=0x0000, 1=0xffff */
+	u8 keep_ref_tag_const;
 };
 
-static int qed_iscsi_async_event(struct qed_hwfn *p_hwfn, u8 fw_event_code,
-				 __le16 echo, union event_ring_data *data,
-				 u8 fw_return_code)
+static int
+qed_iscsi_async_event(struct qed_hwfn *p_hwfn,
+		      u8 fw_event_code,
+		      u16 __maybe_unused echo,
+		      union event_ring_data *data,
+		      u8 __maybe_unused fw_return_code, u8 __maybe_unused vf_id)
 {
-	if (p_hwfn->p_iscsi_info->event_cb) {
+	if (p_hwfn->p_iscsi_info->event_cb != NULL) {
 		struct qed_iscsi_info *p_iscsi = p_hwfn->p_iscsi_info;
 
 		return p_iscsi->event_cb(p_iscsi->event_context,
@@ -144,10 +216,10 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 	struct iscsi_spe_func_init *p_init = NULL;
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
+	u8 i, num_sbs;
 	int rc = 0;
 	u32 dval;
 	u16 val;
-	u8 i;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -180,13 +252,19 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 	val = p_params->half_way_close_timeout;
 	p_init->half_way_close_timeout = cpu_to_le16(val);
 	p_init->num_sq_pages_in_ring = p_params->num_sq_pages_in_ring;
-	p_init->num_r2tq_pages_in_ring = p_params->num_r2tq_pages_in_ring;
+	p_init->num_r2tq_pages_in_ring = p_params->num_sq_pages_in_ring;
 	p_init->num_uhq_pages_in_ring = p_params->num_uhq_pages_in_ring;
 	p_init->ll2_rx_queue_id =
 	    p_hwfn->hw_info.resc_start[QED_LL2_RAM_QUEUE] +
 	    p_params->ll2_ooo_queue_id;
 
+	if (p_params->disable_stats_collection)
+		SET_FIELD(p_init->flags, ISCSI_SPE_FUNC_INIT_COUNTERS_EN, 0);
+	else
+		SET_FIELD(p_init->flags, ISCSI_SPE_FUNC_INIT_COUNTERS_EN, 1);
+
 	p_init->func_params.log_page_size = p_params->log_page_size;
+	p_init->func_params.log_page_size_conn = p_params->log_page_size_conn;
 	val = p_params->num_tasks;
 	p_init->func_params.num_tasks = cpu_to_le16(val);
 	p_init->debug_mode.flags = p_params->debug_mode;
@@ -199,17 +277,21 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 	val = p_params->cmdq_num_entries;
 	p_queue->cmdq_num_entries = cpu_to_le16(val);
 	p_queue->num_queues = p_params->num_queues;
-	dval = (u8)p_hwfn->hw_info.resc_start[QED_CMDQS_CQS];
-	p_queue->queue_relative_offset = (u8)dval;
+	dval = (u8) p_hwfn->hw_info.resc_start[QED_CMDQS_CQS];
+	p_queue->queue_relative_offset = (u8) dval;
 	p_queue->cq_sb_pi = p_params->gl_rq_pi;
 	p_queue->cmdq_sb_pi = p_params->gl_cmd_pi;
 
-	for (i = 0; i < p_params->num_queues; i++) {
+	/* In storage target each CQ/CmdQ pair uses a single SB */
+	num_sbs = p_params->num_queues;
+	if (p_params->is_target)
+		num_sbs /= 2;
+	for (i = 0; i < num_sbs; i++) {
 		val = qed_get_igu_sb_id(p_hwfn, i);
 		p_queue->cq_cmdq_sb_num_arr[i] = cpu_to_le16(val);
 	}
 
-	p_queue->bdq_resource_id = (u8)RESC_START(p_hwfn, QED_BDQ);
+	p_queue->storage_func_id = (u8) RESC_START(p_hwfn, QED_BDQ);
 
 	DMA_REGPAIR_LE(p_queue->bdq_pbl_base_address[BDQ_ID_RQ],
 		       p_params->bdq_pbl_base_addr[BDQ_ID_RQ]);
@@ -228,6 +310,16 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 	p_queue->bdq_xoff_threshold[BDQ_ID_IMM_DATA] = cpu_to_le16(val);
 	val = p_params->bdq_xon_threshold[BDQ_ID_IMM_DATA];
 	p_queue->bdq_xon_threshold[BDQ_ID_IMM_DATA] = cpu_to_le16(val);
+
+	DMA_REGPAIR_LE(p_queue->bdq_pbl_base_address[BDQ_ID_TQ],
+		       p_params->bdq_pbl_base_addr[BDQ_ID_TQ]);
+	p_queue->bdq_pbl_num_entries[BDQ_ID_TQ] =
+	    p_params->bdq_pbl_num_entries[BDQ_ID_TQ];
+	val = p_params->bdq_xoff_threshold[BDQ_ID_TQ];
+	p_queue->bdq_xoff_threshold[BDQ_ID_TQ] = cpu_to_le16(val);
+	val = p_params->bdq_xon_threshold[BDQ_ID_TQ];
+	p_queue->bdq_xon_threshold[BDQ_ID_TQ] = cpu_to_le16(val);
+
 	val = p_params->rq_buffer_size;
 	p_queue->rq_buffer_size = cpu_to_le16(val);
 	if (p_params->is_target) {
@@ -236,6 +328,17 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 		if (p_queue->bdq_pbl_num_entries[BDQ_ID_IMM_DATA])
 			SET_FIELD(p_queue->q_validity,
 				  SCSI_INIT_FUNC_QUEUES_IMM_DATA_VALID, 1);
+		if (p_queue->bdq_pbl_num_entries[BDQ_ID_TQ]) {
+			SET_FIELD(p_queue->q_validity,
+				  SCSI_INIT_FUNC_QUEUES_TQ_VALID, 1);
+			if (p_params->is_soc_en) {
+				SET_FIELD(p_queue->q_validity,
+					  SCSI_INIT_FUNC_QUEUES_SOC_EN, 1);
+				SET_FIELD(p_queue->q_validity,
+					  SCSI_INIT_FUNC_QUEUES_SOC_NUM_OF_BLOCKS_LOG,
+					  p_params->soc_num_of_blocks_log);
+			}
+		}
 		SET_FIELD(p_queue->q_validity,
 			  SCSI_INIT_FUNC_QUEUES_CMD_VALID, 1);
 	} else {
@@ -246,6 +349,8 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 	val = p_params->tx_sws_timer;
 	p_ramrod->tcp_init.tx_sws_timer = cpu_to_le16(val);
 	p_ramrod->tcp_init.max_fin_rt = p_params->max_fin_rt;
+	SET_FIELD(p_ramrod->iscsi_init_spe.params,
+		  ISCSI_SPE_FUNC_INIT_MAX_SYN_RT, p_params->max_syn_rt);
 
 	p_hwfn->p_iscsi_info->event_context = event_context;
 	p_hwfn->p_iscsi_info->event_cb = async_event_cb;
@@ -256,10 +361,11 @@ qed_sp_iscsi_func_start(struct qed_hwfn *p_hwfn,
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }
 
-static int qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
-				     struct qed_iscsi_conn *p_conn,
-				     enum spq_mode comp_mode,
-				     struct qed_spq_comp_cb *p_comp_addr)
+static int
+qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
+			  struct qed_iscsi_conn *p_conn,
+			  enum spq_mode comp_mode,
+			  struct qed_spq_comp_cb *p_comp_addr)
 {
 	struct iscsi_spe_conn_offload *p_ramrod = NULL;
 	struct tcp_offload_params_opt2 *p_tcp2 = NULL;
@@ -270,11 +376,10 @@ static int qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
 	dma_addr_t xhq_pbl_addr;
 	dma_addr_t uhq_pbl_addr;
 	u16 physical_q;
-	__le16 tmp;
 	int rc = 0;
 	u32 dval;
 	u16 wval;
-	u16 *p;
+	u8 ucval;
 	u8 i;
 
 	/* Get SPQ entry */
@@ -294,12 +399,12 @@ static int qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
 
 	/* Transmission PQ is the first of the PF */
 	physical_q = qed_get_cm_pq_idx(p_hwfn, PQ_FLAGS_OFLD);
-	p_conn->physical_q0 = physical_q;
+	p_conn->physical_q0 = cpu_to_le16(physical_q);
 	p_ramrod->iscsi.physical_q0 = cpu_to_le16(physical_q);
 
 	/* iSCSI Pure-ACK PQ */
 	physical_q = qed_get_cm_pq_idx(p_hwfn, PQ_FLAGS_ACK);
-	p_conn->physical_q1 = physical_q;
+	p_conn->physical_q1 = cpu_to_le16(physical_q);
 	p_ramrod->iscsi.physical_q1 = cpu_to_le16(physical_q);
 
 	p_ramrod->conn_id = cpu_to_le16(p_conn->conn_id);
@@ -323,22 +428,30 @@ static int qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
 	if (!GET_FIELD(p_ramrod->iscsi.flags,
 		       ISCSI_CONN_OFFLOAD_PARAMS_TCP_ON_CHIP_1B)) {
 		p_tcp = &p_ramrod->tcp;
-
-		p = (u16 *)p_conn->local_mac;
-		tmp = cpu_to_le16(get_unaligned_be16(p));
-		p_tcp->local_mac_addr_hi = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 1));
-		p_tcp->local_mac_addr_mid = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 2));
-		p_tcp->local_mac_addr_lo = tmp;
-
-		p = (u16 *)p_conn->remote_mac;
-		tmp = cpu_to_le16(get_unaligned_be16(p));
-		p_tcp->remote_mac_addr_hi = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 1));
-		p_tcp->remote_mac_addr_mid = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 2));
-		p_tcp->remote_mac_addr_lo = tmp;
+		ucval = p_conn->local_mac[1];
+		((u8 *) (&p_tcp->local_mac_addr_hi))[0] = ucval;
+		ucval = p_conn->local_mac[0];
+		((u8 *) (&p_tcp->local_mac_addr_hi))[1] = ucval;
+		ucval = p_conn->local_mac[3];
+		((u8 *) (&p_tcp->local_mac_addr_mid))[0] = ucval;
+		ucval = p_conn->local_mac[2];
+		((u8 *) (&p_tcp->local_mac_addr_mid))[1] = ucval;
+		ucval = p_conn->local_mac[5];
+		((u8 *) (&p_tcp->local_mac_addr_lo))[0] = ucval;
+		ucval = p_conn->local_mac[4];
+		((u8 *) (&p_tcp->local_mac_addr_lo))[1] = ucval;
+		ucval = p_conn->remote_mac[1];
+		((u8 *) (&p_tcp->remote_mac_addr_hi))[0] = ucval;
+		ucval = p_conn->remote_mac[0];
+		((u8 *) (&p_tcp->remote_mac_addr_hi))[1] = ucval;
+		ucval = p_conn->remote_mac[3];
+		((u8 *) (&p_tcp->remote_mac_addr_mid))[0] = ucval;
+		ucval = p_conn->remote_mac[2];
+		((u8 *) (&p_tcp->remote_mac_addr_mid))[1] = ucval;
+		ucval = p_conn->remote_mac[5];
+		((u8 *) (&p_tcp->remote_mac_addr_lo))[0] = ucval;
+		ucval = p_conn->remote_mac[4];
+		((u8 *) (&p_tcp->remote_mac_addr_lo))[1] = ucval;
 
 		p_tcp->vlan_id = cpu_to_le16(p_conn->vlan_id);
 
@@ -395,22 +508,31 @@ static int qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
 	} else {
 		p_tcp2 =
 		    &((struct iscsi_spe_conn_offload_option2 *)p_ramrod)->tcp;
+		ucval = p_conn->local_mac[1];
+		((u8 *) (&p_tcp2->local_mac_addr_hi))[0] = ucval;
+		ucval = p_conn->local_mac[0];
+		((u8 *) (&p_tcp2->local_mac_addr_hi))[1] = ucval;
+		ucval = p_conn->local_mac[3];
+		((u8 *) (&p_tcp2->local_mac_addr_mid))[0] = ucval;
+		ucval = p_conn->local_mac[2];
+		((u8 *) (&p_tcp2->local_mac_addr_mid))[1] = ucval;
+		ucval = p_conn->local_mac[5];
+		((u8 *) (&p_tcp2->local_mac_addr_lo))[0] = ucval;
+		ucval = p_conn->local_mac[4];
+		((u8 *) (&p_tcp2->local_mac_addr_lo))[1] = ucval;
 
-		p = (u16 *)p_conn->local_mac;
-		tmp = cpu_to_le16(get_unaligned_be16(p));
-		p_tcp2->local_mac_addr_hi = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 1));
-		p_tcp2->local_mac_addr_mid = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 2));
-		p_tcp2->local_mac_addr_lo = tmp;
-
-		p = (u16 *)p_conn->remote_mac;
-		tmp = cpu_to_le16(get_unaligned_be16(p));
-		p_tcp2->remote_mac_addr_hi = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 1));
-		p_tcp2->remote_mac_addr_mid = tmp;
-		tmp = cpu_to_le16(get_unaligned_be16(p + 2));
-		p_tcp2->remote_mac_addr_lo = tmp;
+		ucval = p_conn->remote_mac[1];
+		((u8 *) (&p_tcp2->remote_mac_addr_hi))[0] = ucval;
+		ucval = p_conn->remote_mac[0];
+		((u8 *) (&p_tcp2->remote_mac_addr_hi))[1] = ucval;
+		ucval = p_conn->remote_mac[3];
+		((u8 *) (&p_tcp2->remote_mac_addr_mid))[0] = ucval;
+		ucval = p_conn->remote_mac[2];
+		((u8 *) (&p_tcp2->remote_mac_addr_mid))[1] = ucval;
+		ucval = p_conn->remote_mac[5];
+		((u8 *) (&p_tcp2->remote_mac_addr_lo))[0] = ucval;
+		ucval = p_conn->remote_mac[4];
+		((u8 *) (&p_tcp2->remote_mac_addr_lo))[1] = ucval;
 
 		p_tcp2->vlan_id = cpu_to_le16(p_conn->vlan_id);
 		p_tcp2->flags = cpu_to_le16(p_conn->tcp_flags);
@@ -445,16 +567,19 @@ static int qed_sp_iscsi_conn_offload(struct qed_hwfn *p_hwfn,
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }
 
-static int qed_sp_iscsi_conn_update(struct qed_hwfn *p_hwfn,
-				    struct qed_iscsi_conn *p_conn,
-				    enum spq_mode comp_mode,
-				    struct qed_spq_comp_cb *p_comp_addr)
+static int
+qed_sp_iscsi_conn_update(struct qed_hwfn *p_hwfn,
+			 struct qed_iscsi_conn *p_conn,
+			 enum spq_mode comp_mode,
+			 struct qed_spq_comp_cb *p_comp_addr)
 {
 	struct iscsi_conn_update_ramrod_params *p_ramrod = NULL;
+	struct dif_on_immediate_params *p_def_dif_conf = NULL;
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc = -EINVAL;
+	int rc = -EOPNOTSUPP;
 	u32 dval;
+	u16 val;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -482,6 +607,76 @@ static int qed_sp_iscsi_conn_update(struct qed_hwfn *p_hwfn,
 	p_ramrod->first_seq_length = cpu_to_le32(dval);
 	p_ramrod->exp_stat_sn = cpu_to_le32(p_conn->exp_stat_sn);
 
+	if (p_conn->dif_on_immediate == QED_ISCSI_CONN_DIF_ON_IMM_DEFAULT) {
+		SET_FIELD(p_ramrod->flags,
+			  ISCSI_CONN_UPDATE_RAMROD_PARAMS_DIF_ON_IMM_EN, 1);
+		SET_FIELD(p_ramrod->flags,
+			  ISCSI_CONN_UPDATE_RAMROD_PARAMS_LUN_MAPPER_EN, 0);
+		p_def_dif_conf = &p_ramrod->dif_on_imme_params.def_dif_conf;
+		dval = p_conn->initial_ref_tag;
+		p_def_dif_conf->initial_ref_tag = cpu_to_le32(dval);
+		val = p_conn->application_tag;
+		p_def_dif_conf->application_tag = cpu_to_le16(val);
+		val = p_conn->application_tag_mask;
+		p_def_dif_conf->application_tag_mask = cpu_to_le16(val);
+
+		val = 0;
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_VALIDATE_GUARD,
+			  p_conn->validate_guard);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_VALIDATE_APP_TAG,
+			  p_conn->validate_app_tag);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_VALIDATE_REF_TAG,
+			  p_conn->validate_ref_tag);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_FORWARD_GUARD,
+			  p_conn->forward_guard);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_FORWARD_APP_TAG,
+			  p_conn->forward_app_tag);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_FORWARD_REF_TAG,
+			  p_conn->forward_ref_tag);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_INTERVAL_SIZE,
+			  p_conn->interval_size);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_NETWORK_INTERFACE,
+			  p_conn->network_interface);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_HOST_INTERFACE,
+			  p_conn->host_interface);
+		SET_FIELD(val, DIF_ON_IMMEDIATE_PARAMS_REF_TAG_MASK,
+			  p_conn->ref_tag_mask);
+		SET_FIELD(val,
+			  DIF_ON_IMMEDIATE_PARAMS_FORWARD_APP_TAG_WITH_MASK,
+			  p_conn->forward_app_tag_with_mask);
+		SET_FIELD(val,
+			  DIF_ON_IMMEDIATE_PARAMS_FORWARD_REF_TAG_WITH_MASK,
+			  p_conn->forward_ref_tag_with_mask);
+		p_def_dif_conf->flags1 = cpu_to_le16(val);
+
+		SET_FIELD(p_def_dif_conf->flags0,
+			  DIF_ON_IMMEDIATE_PARAMS_IGNORE_APP_TAG,
+			  p_conn->ignore_app_tag);
+		SET_FIELD(p_def_dif_conf->flags0,
+			  DIF_ON_IMMEDIATE_PARAMS_INITIAL_REF_TAG_IS_VALID,
+			  p_conn->initial_ref_tag_is_valid);
+		SET_FIELD(p_def_dif_conf->flags0,
+			  DIF_ON_IMMEDIATE_PARAMS_HOST_GUARD_TYPE,
+			  p_conn->host_guard_type);
+		SET_FIELD(p_def_dif_conf->flags0,
+			  DIF_ON_IMMEDIATE_PARAMS_PROTECTION_TYPE,
+			  p_conn->protection_type);
+		SET_FIELD(p_def_dif_conf->flags0,
+			  DIF_ON_IMMEDIATE_PARAMS_CRC_SEED, p_conn->crc_seed);
+		SET_FIELD(p_def_dif_conf->flags0,
+			  DIF_ON_IMMEDIATE_PARAMS_KEEP_REF_TAG_CONST,
+			  p_conn->keep_ref_tag_const);
+	} else if (p_conn->dif_on_immediate ==
+		   QED_ISCSI_CONN_DIF_ON_IMM_LUN_MAPPER) {
+		SET_FIELD(p_ramrod->flags,
+			  ISCSI_CONN_UPDATE_RAMROD_PARAMS_DIF_ON_IMM_EN, 1);
+		SET_FIELD(p_ramrod->flags,
+			  ISCSI_CONN_UPDATE_RAMROD_PARAMS_LUN_MAPPER_EN, 1);
+		DMA_REGPAIR_LE(p_ramrod->dif_on_imme_params.
+			       lun_mapper_address.lun_mapper_addr,
+			       p_conn->lun_mapper_phys_addr);
+	}
+
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }
 
@@ -493,8 +688,8 @@ qed_sp_iscsi_mac_update(struct qed_hwfn *p_hwfn,
 {
 	struct iscsi_spe_conn_mac_update *p_ramrod = NULL;
 	struct qed_spq_entry *p_ent = NULL;
+	int rc = -EOPNOTSUPP;
 	struct qed_sp_init_data init_data;
-	int rc = -EINVAL;
 	u8 ucval;
 
 	/* Get SPQ entry */
@@ -514,30 +709,33 @@ qed_sp_iscsi_mac_update(struct qed_hwfn *p_hwfn,
 
 	p_ramrod->conn_id = cpu_to_le16(p_conn->conn_id);
 	ucval = p_conn->remote_mac[1];
-	((u8 *)(&p_ramrod->remote_mac_addr_hi))[0] = ucval;
+	((u8 *) (&p_ramrod->remote_mac_addr_hi))[0] = ucval;
 	ucval = p_conn->remote_mac[0];
-	((u8 *)(&p_ramrod->remote_mac_addr_hi))[1] = ucval;
+	((u8 *) (&p_ramrod->remote_mac_addr_hi))[1] = ucval;
 	ucval = p_conn->remote_mac[3];
-	((u8 *)(&p_ramrod->remote_mac_addr_mid))[0] = ucval;
+	((u8 *) (&p_ramrod->remote_mac_addr_mid))[0] = ucval;
 	ucval = p_conn->remote_mac[2];
-	((u8 *)(&p_ramrod->remote_mac_addr_mid))[1] = ucval;
+	((u8 *) (&p_ramrod->remote_mac_addr_mid))[1] = ucval;
 	ucval = p_conn->remote_mac[5];
-	((u8 *)(&p_ramrod->remote_mac_addr_lo))[0] = ucval;
+	((u8 *) (&p_ramrod->remote_mac_addr_lo))[0] = ucval;
 	ucval = p_conn->remote_mac[4];
-	((u8 *)(&p_ramrod->remote_mac_addr_lo))[1] = ucval;
+	((u8 *) (&p_ramrod->remote_mac_addr_lo))[1] = ucval;
 
-	return qed_spq_post(p_hwfn, p_ent, NULL);
+	rc = qed_spq_post(p_hwfn, p_ent, NULL);
+
+	return rc;
 }
 
-static int qed_sp_iscsi_conn_terminate(struct qed_hwfn *p_hwfn,
-				       struct qed_iscsi_conn *p_conn,
-				       enum spq_mode comp_mode,
-				       struct qed_spq_comp_cb *p_comp_addr)
+static int
+qed_sp_iscsi_conn_terminate(struct qed_hwfn *p_hwfn,
+			    struct qed_iscsi_conn *p_conn,
+			    enum spq_mode comp_mode,
+			    struct qed_spq_comp_cb *p_comp_addr)
 {
 	struct iscsi_spe_conn_termination *p_ramrod = NULL;
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc = -EINVAL;
+	int rc = -EOPNOTSUPP;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -564,14 +762,15 @@ static int qed_sp_iscsi_conn_terminate(struct qed_hwfn *p_hwfn,
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }
 
-static int qed_sp_iscsi_conn_clear_sq(struct qed_hwfn *p_hwfn,
-				      struct qed_iscsi_conn *p_conn,
-				      enum spq_mode comp_mode,
-				      struct qed_spq_comp_cb *p_comp_addr)
+static int
+qed_sp_iscsi_conn_clear_sq(struct qed_hwfn *p_hwfn,
+			   struct qed_iscsi_conn *p_conn,
+			   enum spq_mode comp_mode,
+			   struct qed_spq_comp_cb *p_comp_addr)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
-	int rc = -EINVAL;
+	int rc = -EOPNOTSUPP;
 
 	/* Get SPQ entry */
 	memset(&init_data, 0, sizeof(init_data));
@@ -589,9 +788,10 @@ static int qed_sp_iscsi_conn_clear_sq(struct qed_hwfn *p_hwfn,
 	return qed_spq_post(p_hwfn, p_ent, NULL);
 }
 
-static int qed_sp_iscsi_func_stop(struct qed_hwfn *p_hwfn,
-				  enum spq_mode comp_mode,
-				  struct qed_spq_comp_cb *p_comp_addr)
+static int
+qed_sp_iscsi_func_stop(struct qed_hwfn *p_hwfn,
+		       enum spq_mode comp_mode,
+		       struct qed_spq_comp_cb *p_comp_addr)
 {
 	struct qed_spq_entry *p_ent = NULL;
 	struct qed_sp_init_data init_data;
@@ -618,19 +818,17 @@ static int qed_sp_iscsi_func_stop(struct qed_hwfn *p_hwfn,
 
 static void __iomem *qed_iscsi_get_db_addr(struct qed_hwfn *p_hwfn, u32 cid)
 {
-	return (u8 __iomem *)p_hwfn->doorbells +
-			     qed_db_addr(cid, DQ_DEMS_LEGACY);
+	return (u8 __iomem *) p_hwfn->doorbells + DB_ADDR(cid, DQ_DEMS_LEGACY);
 }
 
 static void __iomem *qed_iscsi_get_primary_bdq_prod(struct qed_hwfn *p_hwfn,
 						    u8 bdq_id)
 {
 	if (RESC_NUM(p_hwfn, QED_BDQ)) {
-		return (u8 __iomem *)p_hwfn->regview +
-		       GTT_BAR0_MAP_REG_MSDM_RAM +
-		       MSTORM_SCSI_BDQ_EXT_PROD_OFFSET(RESC_START(p_hwfn,
-								  QED_BDQ),
-						       bdq_id);
+		return (u8 __iomem *) p_hwfn->regview +
+		    GET_GTT_BDQ_REG_ADDR(GTT_BAR0_MAP_REG_MSDM_RAM,
+					 MSTORM_SCSI_BDQ_EXT_PROD,
+					 RESC_START(p_hwfn, QED_BDQ), bdq_id);
 	} else {
 		DP_NOTICE(p_hwfn, "BDQ is not allocated!\n");
 		return NULL;
@@ -641,11 +839,10 @@ static void __iomem *qed_iscsi_get_secondary_bdq_prod(struct qed_hwfn *p_hwfn,
 						      u8 bdq_id)
 {
 	if (RESC_NUM(p_hwfn, QED_BDQ)) {
-		return (u8 __iomem *)p_hwfn->regview +
-		       GTT_BAR0_MAP_REG_TSDM_RAM +
-		       TSTORM_SCSI_BDQ_EXT_PROD_OFFSET(RESC_START(p_hwfn,
-								  QED_BDQ),
-						       bdq_id);
+		return (u8 __iomem *) p_hwfn->regview +
+		    GET_GTT_BDQ_REG_ADDR(GTT_BAR0_MAP_REG_TSDM_RAM,
+					 TSTORM_SCSI_BDQ_EXT_PROD,
+					 RESC_START(p_hwfn, QED_BDQ), bdq_id);
 	} else {
 		DP_NOTICE(p_hwfn, "BDQ is not allocated!\n");
 		return NULL;
@@ -681,25 +878,25 @@ nomem:
 	return -ENOMEM;
 }
 
-static int qed_iscsi_allocate_connection(struct qed_hwfn *p_hwfn,
-					 struct qed_iscsi_conn **p_out_conn)
+static int
+qed_iscsi_allocate_connection(struct qed_hwfn *p_hwfn,
+			      struct qed_iscsi_conn **p_out_conn)
 {
+	u16 uhq_num_elements = 0, xhq_num_elements = 0, r2tq_num_elements = 0;
 	struct scsi_terminate_extra_params *p_q_cnts = NULL;
 	struct qed_iscsi_pf_params *p_params = NULL;
-	struct qed_chain_init_params params = {
-		.mode		= QED_CHAIN_MODE_PBL,
-		.intended_use	= QED_CHAIN_USE_TO_CONSUME_PRODUCE,
-		.cnt_type	= QED_CHAIN_CNT_TYPE_U16,
-	};
 	struct tcp_upload_params *p_tcp = NULL;
 	struct qed_iscsi_conn *p_conn = NULL;
+	struct iscsi_conn_stats_params *p_stats = NULL;
+	struct qed_chain_params chain_params;
 	int rc = 0;
 
 	/* Try finding a free connection that can be used */
 	spin_lock_bh(&p_hwfn->p_iscsi_info->lock);
 	if (!list_empty(&p_hwfn->p_iscsi_info->free_list))
-		p_conn = list_first_entry(&p_hwfn->p_iscsi_info->free_list,
-					  struct qed_iscsi_conn, list_entry);
+		p_conn =
+		    list_first_entry(&p_hwfn->p_iscsi_info->free_list,
+				     struct qed_iscsi_conn, list_entry);
 	if (p_conn) {
 		list_del(&p_conn->list_entry);
 		spin_unlock_bh(&p_hwfn->p_iscsi_info->lock);
@@ -715,10 +912,10 @@ static int qed_iscsi_allocate_connection(struct qed_hwfn *p_hwfn,
 	if (!p_conn)
 		return -ENOMEM;
 
-	p_q_cnts = dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
-				      sizeof(*p_q_cnts),
-				      &p_conn->queue_cnts_phys_addr,
-				      GFP_KERNEL);
+	p_q_cnts =
+	    dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
+			       sizeof(*p_q_cnts),
+			       &p_conn->queue_cnts_phys_addr, GFP_KERNEL);
 	if (!p_q_cnts)
 		goto nomem_queue_cnts_param;
 	p_conn->queue_cnts_virt_addr = p_q_cnts;
@@ -731,25 +928,43 @@ static int qed_iscsi_allocate_connection(struct qed_hwfn *p_hwfn,
 		goto nomem_upload_param;
 	p_conn->tcp_upload_params_virt_addr = p_tcp;
 
-	params.num_elems = p_params->num_r2tq_pages_in_ring *
-			   QED_CHAIN_PAGE_SIZE / sizeof(struct iscsi_wqe);
-	params.elem_size = sizeof(struct iscsi_wqe);
+	p_stats = dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
+				     sizeof(*p_stats),
+				     &p_conn->conn_stats_params_phys_addr,
+				     GFP_KERNEL);
+	if (!p_stats)
+		goto nomem_stats_param;
+	p_conn->conn_stats_params_virt_addr = p_stats;
 
-	rc = qed_chain_alloc(p_hwfn->cdev, &p_conn->r2tq, &params);
+	r2tq_num_elements = p_params->num_sq_pages_in_ring *
+	    QED_CHAIN_PAGE_SIZE / sizeof(struct iscsi_wqe);
+	qed_chain_params_init(&chain_params,
+			      QED_CHAIN_USE_TO_CONSUME_PRODUCE,
+			      QED_CHAIN_MODE_PBL,
+			      QED_CHAIN_CNT_TYPE_U16,
+			      r2tq_num_elements, sizeof(struct iscsi_wqe));
+	rc = qed_chain_alloc(p_hwfn->cdev, &p_conn->r2tq, &chain_params);
 	if (rc)
 		goto nomem_r2tq;
 
-	params.num_elems = p_params->num_uhq_pages_in_ring *
-			   QED_CHAIN_PAGE_SIZE / sizeof(struct iscsi_uhqe);
-	params.elem_size = sizeof(struct iscsi_uhqe);
-
-	rc = qed_chain_alloc(p_hwfn->cdev, &p_conn->uhq, &params);
+	uhq_num_elements = p_params->num_uhq_pages_in_ring *
+	    QED_CHAIN_PAGE_SIZE / sizeof(struct iscsi_uhqe);
+	qed_chain_params_init(&chain_params,
+			      QED_CHAIN_USE_TO_CONSUME_PRODUCE,
+			      QED_CHAIN_MODE_PBL,
+			      QED_CHAIN_CNT_TYPE_U16,
+			      uhq_num_elements, sizeof(struct iscsi_uhqe));
+	rc = qed_chain_alloc(p_hwfn->cdev, &p_conn->uhq, &chain_params);
 	if (rc)
 		goto nomem_uhq;
 
-	params.elem_size = sizeof(struct iscsi_xhqe);
-
-	rc = qed_chain_alloc(p_hwfn->cdev, &p_conn->xhq, &params);
+	xhq_num_elements = uhq_num_elements;
+	qed_chain_params_init(&chain_params,
+			      QED_CHAIN_USE_TO_CONSUME_PRODUCE,
+			      QED_CHAIN_MODE_PBL,
+			      QED_CHAIN_CNT_TYPE_U16,
+			      xhq_num_elements, sizeof(struct iscsi_xhqe));
+	rc = qed_chain_alloc(p_hwfn->cdev, &p_conn->xhq, &chain_params);
 	if (rc)
 		goto nomem;
 
@@ -761,13 +976,15 @@ nomem:
 	qed_chain_free(p_hwfn->cdev, &p_conn->uhq);
 nomem_uhq:
 	qed_chain_free(p_hwfn->cdev, &p_conn->r2tq);
-nomem_r2tq:
-	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+nomem_r2tq:dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+			  sizeof(struct iscsi_conn_stats_params),
+			  p_conn->conn_stats_params_virt_addr,
+			  p_conn->conn_stats_params_phys_addr);
+nomem_stats_param:dma_free_coherent(&p_hwfn->cdev->pdev->dev,
 			  sizeof(struct tcp_upload_params),
 			  p_conn->tcp_upload_params_virt_addr,
 			  p_conn->tcp_upload_params_phys_addr);
-nomem_upload_param:
-	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+nomem_upload_param:dma_free_coherent(&p_hwfn->cdev->pdev->dev,
 			  sizeof(struct scsi_terminate_extra_params),
 			  p_conn->queue_cnts_virt_addr,
 			  p_conn->queue_cnts_phys_addr);
@@ -777,9 +994,10 @@ nomem_queue_cnts_param:
 	return -ENOMEM;
 }
 
-static int qed_iscsi_acquire_connection(struct qed_hwfn *p_hwfn,
-					struct qed_iscsi_conn *p_in_conn,
-					struct qed_iscsi_conn **p_out_conn)
+static int
+qed_iscsi_acquire_connection(struct qed_hwfn *p_hwfn,
+			     struct qed_iscsi_conn *p_in_conn,
+			     struct qed_iscsi_conn **p_out_conn)
 {
 	struct qed_iscsi_conn *p_conn = NULL;
 	int rc = 0;
@@ -801,6 +1019,7 @@ static int qed_iscsi_acquire_connection(struct qed_hwfn *p_hwfn,
 		rc = qed_iscsi_setup_connection(p_conn);
 
 	if (rc) {
+		/* TODO - Aren't we possibly leaking a connection here? */
 		spin_lock_bh(&p_hwfn->p_iscsi_info->lock);
 		qed_cxt_release_cid(p_hwfn, icid);
 		spin_unlock_bh(&p_hwfn->p_iscsi_info->lock);
@@ -808,7 +1027,7 @@ static int qed_iscsi_acquire_connection(struct qed_hwfn *p_hwfn,
 	}
 
 	p_conn->icid = icid;
-	p_conn->conn_id = (u16)icid;
+	p_conn->conn_id = (u16) icid;
 	p_conn->fw_cid = (p_hwfn->hw_info.opaque_fid << 16) | icid;
 
 	*p_out_conn = p_conn;
@@ -816,8 +1035,9 @@ static int qed_iscsi_acquire_connection(struct qed_hwfn *p_hwfn,
 	return rc;
 }
 
-static void qed_iscsi_release_connection(struct qed_hwfn *p_hwfn,
-					 struct qed_iscsi_conn *p_conn)
+static void
+qed_iscsi_release_connection(struct qed_hwfn *p_hwfn,
+			     struct qed_iscsi_conn *p_conn)
 {
 	spin_lock_bh(&p_hwfn->p_iscsi_info->lock);
 	list_add_tail(&p_conn->list_entry, &p_hwfn->p_iscsi_info->free_list);
@@ -825,8 +1045,9 @@ static void qed_iscsi_release_connection(struct qed_hwfn *p_hwfn,
 	spin_unlock_bh(&p_hwfn->p_iscsi_info->lock);
 }
 
-static void qed_iscsi_free_connection(struct qed_hwfn *p_hwfn,
-				      struct qed_iscsi_conn *p_conn)
+static void
+qed_iscsi_free_connection(struct qed_hwfn *p_hwfn,
+			  struct qed_iscsi_conn *p_conn)
 {
 	qed_chain_free(p_hwfn->cdev, &p_conn->xhq);
 	qed_chain_free(p_hwfn->cdev, &p_conn->uhq);
@@ -835,6 +1056,10 @@ static void qed_iscsi_free_connection(struct qed_hwfn *p_hwfn,
 			  sizeof(struct tcp_upload_params),
 			  p_conn->tcp_upload_params_virt_addr,
 			  p_conn->tcp_upload_params_phys_addr);
+	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+			  sizeof(struct iscsi_conn_stats_params),
+			  p_conn->conn_stats_params_virt_addr,
+			  p_conn->conn_stats_params_phys_addr);
 	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
 			  sizeof(struct scsi_terminate_extra_params),
 			  p_conn->queue_cnts_virt_addr,
@@ -847,8 +1072,10 @@ int qed_iscsi_alloc(struct qed_hwfn *p_hwfn)
 	struct qed_iscsi_info *p_iscsi_info;
 
 	p_iscsi_info = kzalloc(sizeof(*p_iscsi_info), GFP_KERNEL);
-	if (!p_iscsi_info)
+	if (!p_iscsi_info) {
+		DP_NOTICE(p_hwfn, "Failed to allocate qed_iscsi_info'\n");
 		return -ENOMEM;
+	}
 
 	INIT_LIST_HEAD(&p_iscsi_info->free_list);
 
@@ -890,7 +1117,7 @@ static void _qed_iscsi_get_tstats(struct qed_hwfn *p_hwfn,
 
 	memset(&tstats, 0, sizeof(tstats));
 	tstats_addr = BAR0_MAP_REG_TSDM_RAM +
-		      TSTORM_ISCSI_RX_STATS_OFFSET(p_hwfn->rel_pf_id);
+	    TSTORM_ISCSI_RX_STATS_OFFSET(p_hwfn->rel_pf_id);
 	qed_memcpy_from(p_hwfn, p_ptt, &tstats, tstats_addr, sizeof(tstats));
 
 	p_stats->iscsi_rx_bytes_cnt =
@@ -905,6 +1132,12 @@ static void _qed_iscsi_get_tstats(struct qed_hwfn *p_hwfn,
 	    le32_to_cpu(tstats.iscsi_rq_threshold_cnt);
 	p_stats->iscsi_immq_threshold_cnt =
 	    le32_to_cpu(tstats.iscsi_immq_threshold_cnt);
+	p_stats->iscsi_rx_tcp_payload_bytes_cnt =
+	    HILO_64_REGPAIR(tstats.iscsi_rx_tcp_payload_bytes_cnt);
+	p_stats->iscsi_rx_tcp_pkt_cnt =
+	    HILO_64_REGPAIR(tstats.iscsi_rx_tcp_pkt_cnt);
+	p_stats->iscsi_rx_pure_ack_cnt =
+	    HILO_64_REGPAIR(tstats.iscsi_rx_pure_ack_cnt);
 }
 
 static void _qed_iscsi_get_mstats(struct qed_hwfn *p_hwfn,
@@ -916,11 +1149,13 @@ static void _qed_iscsi_get_mstats(struct qed_hwfn *p_hwfn,
 
 	memset(&mstats, 0, sizeof(mstats));
 	mstats_addr = BAR0_MAP_REG_MSDM_RAM +
-		      MSTORM_ISCSI_RX_STATS_OFFSET(p_hwfn->rel_pf_id);
+	    MSTORM_ISCSI_RX_STATS_OFFSET(p_hwfn->rel_pf_id);
 	qed_memcpy_from(p_hwfn, p_ptt, &mstats, mstats_addr, sizeof(mstats));
 
 	p_stats->iscsi_rx_dropped_pdus_task_not_valid =
-	    HILO_64_REGPAIR(mstats.iscsi_rx_dropped_pdus_task_not_valid);
+	    HILO_64_REGPAIR(mstats.iscsi_rx_dropped_PDUs_task_not_valid);
+	p_stats->iscsi_rx_dup_ack_cnt =
+	    HILO_64_REGPAIR(mstats.iscsi_rx_dup_ack_cnt);
 }
 
 static void _qed_iscsi_get_ustats(struct qed_hwfn *p_hwfn,
@@ -932,7 +1167,7 @@ static void _qed_iscsi_get_ustats(struct qed_hwfn *p_hwfn,
 
 	memset(&ustats, 0, sizeof(ustats));
 	ustats_addr = BAR0_MAP_REG_USDM_RAM +
-		      USTORM_ISCSI_RX_STATS_OFFSET(p_hwfn->rel_pf_id);
+	    USTORM_ISCSI_RX_STATS_OFFSET(p_hwfn->rel_pf_id);
 	qed_memcpy_from(p_hwfn, p_ptt, &ustats, ustats_addr, sizeof(ustats));
 
 	p_stats->iscsi_rx_data_pdu_cnt =
@@ -952,13 +1187,17 @@ static void _qed_iscsi_get_xstats(struct qed_hwfn *p_hwfn,
 
 	memset(&xstats, 0, sizeof(xstats));
 	xstats_addr = BAR0_MAP_REG_XSDM_RAM +
-		      XSTORM_ISCSI_TX_STATS_OFFSET(p_hwfn->rel_pf_id);
+	    XSTORM_ISCSI_TX_STATS_OFFSET(p_hwfn->rel_pf_id);
 	qed_memcpy_from(p_hwfn, p_ptt, &xstats, xstats_addr, sizeof(xstats));
 
 	p_stats->iscsi_tx_go_to_slow_start_event_cnt =
 	    HILO_64_REGPAIR(xstats.iscsi_tx_go_to_slow_start_event_cnt);
 	p_stats->iscsi_tx_fast_retransmit_event_cnt =
 	    HILO_64_REGPAIR(xstats.iscsi_tx_fast_retransmit_event_cnt);
+	p_stats->iscsi_tx_pure_ack_cnt =
+	    HILO_64_REGPAIR(xstats.iscsi_tx_pure_ack_cnt);
+	p_stats->iscsi_tx_delayed_ack_cnt =
+	    HILO_64_REGPAIR(xstats.iscsi_tx_delayed_ack_cnt);
 }
 
 static void _qed_iscsi_get_ystats(struct qed_hwfn *p_hwfn,
@@ -970,7 +1209,7 @@ static void _qed_iscsi_get_ystats(struct qed_hwfn *p_hwfn,
 
 	memset(&ystats, 0, sizeof(ystats));
 	ystats_addr = BAR0_MAP_REG_YSDM_RAM +
-		      YSTORM_ISCSI_TX_STATS_OFFSET(p_hwfn->rel_pf_id);
+	    YSTORM_ISCSI_TX_STATS_OFFSET(p_hwfn->rel_pf_id);
 	qed_memcpy_from(p_hwfn, p_ptt, &ystats, ystats_addr, sizeof(ystats));
 
 	p_stats->iscsi_tx_data_pdu_cnt =
@@ -979,6 +1218,10 @@ static void _qed_iscsi_get_ystats(struct qed_hwfn *p_hwfn,
 	    HILO_64_REGPAIR(ystats.iscsi_tx_r2t_pdu_cnt);
 	p_stats->iscsi_tx_total_pdu_cnt =
 	    HILO_64_REGPAIR(ystats.iscsi_tx_total_pdu_cnt);
+	p_stats->iscsi_tx_tcp_payload_bytes_cnt =
+	    HILO_64_REGPAIR(ystats.iscsi_tx_tcp_payload_bytes_cnt);
+	p_stats->iscsi_tx_tcp_pkt_cnt =
+	    HILO_64_REGPAIR(ystats.iscsi_tx_tcp_pkt_cnt);
 }
 
 static void _qed_iscsi_get_pstats(struct qed_hwfn *p_hwfn,
@@ -990,7 +1233,7 @@ static void _qed_iscsi_get_pstats(struct qed_hwfn *p_hwfn,
 
 	memset(&pstats, 0, sizeof(pstats));
 	pstats_addr = BAR0_MAP_REG_PSDM_RAM +
-		      PSTORM_ISCSI_TX_STATS_OFFSET(p_hwfn->rel_pf_id);
+	    PSTORM_ISCSI_TX_STATS_OFFSET(p_hwfn->rel_pf_id);
 	qed_memcpy_from(p_hwfn, p_ptt, &pstats, pstats_addr, sizeof(pstats));
 
 	p_stats->iscsi_tx_bytes_cnt =
@@ -999,8 +1242,8 @@ static void _qed_iscsi_get_pstats(struct qed_hwfn *p_hwfn,
 	    HILO_64_REGPAIR(pstats.iscsi_tx_packet_cnt);
 }
 
-static int qed_iscsi_get_stats(struct qed_hwfn *p_hwfn,
-			       struct qed_iscsi_stats *stats)
+static int
+qed_iscsi_get_stats(struct qed_hwfn *p_hwfn, struct qed_iscsi_stats *stats)
 {
 	struct qed_ptt *p_ptt;
 
@@ -1009,7 +1252,7 @@ static int qed_iscsi_get_stats(struct qed_hwfn *p_hwfn,
 	p_ptt = qed_ptt_acquire(p_hwfn);
 	if (!p_ptt) {
 		DP_ERR(p_hwfn, "Failed to acquire ptt\n");
-		return -EAGAIN;
+		return -EINVAL;
 	}
 
 	_qed_iscsi_get_tstats(p_hwfn, p_ptt, stats);
@@ -1062,10 +1305,21 @@ static struct qed_hash_iscsi_con *qed_iscsi_get_hash(struct qed_dev *cdev,
 {
 	struct qed_hash_iscsi_con *hash_con = NULL;
 
+#ifdef _HAS_HASH_FOR_EACH_POSSIBLE_V1	/* ! QED_UPSTREAM */
+	struct hlist_node *hn;
+#endif
+
 	if (!(cdev->flags & QED_FLAG_STORAGE_STARTED))
 		return NULL;
 
+	/* TODO - currently assume one-pending via API; If not true, need
+	 * to add a lock around connections
+	 */
+#ifndef _HAS_HASH_FOR_EACH_POSSIBLE_V1	/* QED_UPSTREAM */
 	hash_for_each_possible(cdev->connections, hash_con, node, handle) {
+#else
+	hash_for_each_possible(cdev->connections, hash_con, hn, node, handle) {
+#endif
 		if (hash_con->con->icid == handle)
 			break;
 	}
@@ -1101,17 +1355,17 @@ static int qed_iscsi_stop(struct qed_dev *cdev)
 
 static int qed_iscsi_start(struct qed_dev *cdev,
 			   struct qed_iscsi_tid *tasks,
-			   void *event_context,
-			   iscsi_event_cb_t async_event_cb)
+			   void *event_context, iscsi_event_cb_t async_event_cb)
 {
-	int rc;
 	struct qed_tid_mem *tid_info;
+	int rc;
 
 	if (cdev->flags & QED_FLAG_STORAGE_STARTED) {
 		DP_NOTICE(cdev, "iscsi already started;\n");
 		return 0;
 	}
 
+	/* TODO - actually fix this */
 	rc = qed_sp_iscsi_func_start(QED_AFFIN_HWFN(cdev), QED_SPQ_MODE_EBLOCK,
 				     NULL, event_context, async_event_cb);
 	if (rc) {
@@ -1152,8 +1406,8 @@ static int qed_iscsi_start(struct qed_dev *cdev,
 }
 
 static int qed_iscsi_acquire_conn(struct qed_dev *cdev,
-				  u32 *handle,
-				  u32 *fw_cid, void __iomem **p_doorbell)
+				  u32 * handle,
+				  u32 * fw_cid, void __iomem ** p_doorbell)
 {
 	struct qed_hash_iscsi_con *hash_con;
 	int rc;
@@ -1333,6 +1587,14 @@ static int qed_iscsi_destroy_conn(struct qed_dev *cdev,
 
 	hash_con->con->abortive_dsconnect = abrt_conn;
 
+	/* TODO - need to decide what to do about the 3-way handshake.
+	 * For now [since we don't have it, block until ramrod passes and
+	 * that's it.
+	 * In future, main question is whether this call is blocking until
+	 * handshake is over [and thus handshake is fully contained within
+	 * qed], or we need an async CB registered by driver for this purpose
+	 * and this one returns.
+	 */
 	return qed_sp_iscsi_conn_terminate(QED_AFFIN_HWFN(cdev), hash_con->con,
 					   QED_SPQ_MODE_EBLOCK, NULL);
 }
@@ -1343,7 +1605,7 @@ static int qed_iscsi_stats(struct qed_dev *cdev, struct qed_iscsi_stats *stats)
 }
 
 static int qed_iscsi_change_mac(struct qed_dev *cdev,
-				u32 handle, const u8 *mac)
+				u32 handle, const u8 * mac)
 {
 	struct qed_hash_iscsi_con *hash_con;
 
@@ -1379,29 +1641,43 @@ void qed_get_protocol_stats_iscsi(struct qed_dev *cdev,
 }
 
 static const struct qed_iscsi_ops qed_iscsi_ops_pass = {
-	.common = &qed_common_ops_pass,
-	.ll2 = &qed_ll2_ops_pass,
-	.fill_dev_info = &qed_fill_iscsi_dev_info,
-	.register_ops = &qed_register_iscsi_ops,
-	.start = &qed_iscsi_start,
-	.stop = &qed_iscsi_stop,
-	.acquire_conn = &qed_iscsi_acquire_conn,
-	.release_conn = &qed_iscsi_release_conn,
-	.offload_conn = &qed_iscsi_offload_conn,
-	.update_conn = &qed_iscsi_update_conn,
-	.destroy_conn = &qed_iscsi_destroy_conn,
-	.clear_sq = &qed_iscsi_clear_conn_sq,
-	.get_stats = &qed_iscsi_stats,
-	.change_mac = &qed_iscsi_change_mac,
+	INIT_STRUCT_FIELD(common, &qed_common_ops_pass),
+	INIT_STRUCT_FIELD(ll2, &qed_ll2_ops_pass),
+	INIT_STRUCT_FIELD(fill_dev_info, &qed_fill_iscsi_dev_info),
+	INIT_STRUCT_FIELD(register_ops, &qed_register_iscsi_ops),
+	INIT_STRUCT_FIELD(start, &qed_iscsi_start),
+	INIT_STRUCT_FIELD(stop, &qed_iscsi_stop),
+	INIT_STRUCT_FIELD(acquire_conn, &qed_iscsi_acquire_conn),
+	INIT_STRUCT_FIELD(release_conn, &qed_iscsi_release_conn),
+	INIT_STRUCT_FIELD(offload_conn, &qed_iscsi_offload_conn),
+	INIT_STRUCT_FIELD(update_conn, &qed_iscsi_update_conn),
+	INIT_STRUCT_FIELD(destroy_conn, &qed_iscsi_destroy_conn),
+	INIT_STRUCT_FIELD(clear_sq, &qed_iscsi_clear_conn_sq),
+	INIT_STRUCT_FIELD(get_stats, &qed_iscsi_stats),
+	INIT_STRUCT_FIELD(change_mac, &qed_iscsi_change_mac),
 };
 
+#ifdef QED_UPSTREAM
 const struct qed_iscsi_ops *qed_get_iscsi_ops(void)
 {
 	return &qed_iscsi_ops_pass;
 }
+#else
+const struct qed_iscsi_ops *qed_get_iscsi_ops(u32 version)
+{
+	if (version != QED_ISCSI_INTERFACE_VERSION) {
+		pr_notice("Cannot supply ethtool operations [%08x != %08x]\n",
+			  version, QED_ISCSI_INTERFACE_VERSION);
+		return NULL;
+	}
+	return &qed_iscsi_ops_pass;
+}
+#endif
 EXPORT_SYMBOL(qed_get_iscsi_ops);
 
 void qed_put_iscsi_ops(void)
 {
+	/* TODO - reference count for module? */
 }
+
 EXPORT_SYMBOL(qed_put_iscsi_ops);

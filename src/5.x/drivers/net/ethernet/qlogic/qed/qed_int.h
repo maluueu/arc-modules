@@ -1,29 +1,60 @@
-/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef _QED_INT_H
 #define _QED_INT_H
-
 #include <linux/types.h>
+#include <linux/compiler.h>
+#include <linux/kernel.h>
 #include <linux/slab.h>
+#include "common_hsi.h"
 #include "qed.h"
+#ifndef _QED_IGU_DEF_H_
+#define _QED_IGU_DEF_H_
 
-/* Fields of IGU PF CONFIGURATION REGISTER */
-#define IGU_PF_CONF_FUNC_EN       (0x1 << 0)    /* function enable        */
-#define IGU_PF_CONF_MSI_MSIX_EN   (0x1 << 1)    /* MSI/MSIX enable        */
-#define IGU_PF_CONF_INT_LINE_EN   (0x1 << 2)    /* INT enable             */
-#define IGU_PF_CONF_ATTN_BIT_EN   (0x1 << 3)    /* attention enable       */
-#define IGU_PF_CONF_SINGLE_ISR_EN (0x1 << 4)    /* single ISR mode enable */
-#define IGU_PF_CONF_SIMD_MODE     (0x1 << 5)    /* simd all ones mode     */
-/* Fields of IGU VF CONFIGURATION REGISTER */
+/* Fields of IGU PF CONFIGRATION REGISTER */
+#define IGU_PF_CONF_FUNC_EN       (0x1 << 0)	/* function enable        */
+#define IGU_PF_CONF_MSI_MSIX_EN   (0x1 << 1)	/* MSI/MSIX enable        */
+#define IGU_PF_CONF_INT_LINE_EN   (0x1 << 2)	/* INT enable             */
+#define IGU_PF_CONF_ATTN_BIT_EN   (0x1 << 3)	/* attention enable       */
+#define IGU_PF_CONF_SINGLE_ISR_EN (0x1 << 4)	/* single ISR mode enable */
+#define IGU_PF_CONF_SIMD_MODE     (0x1 << 5)	/* simd all ones mode     */
+
+/* Fields of IGU VF CONFIGRATION REGISTER */
 #define IGU_VF_CONF_FUNC_EN        (0x1 << 0)	/* function enable        */
 #define IGU_VF_CONF_MSI_MSIX_EN    (0x1 << 1)	/* MSI/MSIX enable        */
 #define IGU_VF_CONF_SINGLE_ISR_EN  (0x1 << 4)	/* single ISR mode enable */
 #define IGU_VF_CONF_PARENT_MASK    (0xF)	/* Parent PF              */
-#define IGU_VF_CONF_PARENT_SHIFT   5		/* Parent PF              */
+#define IGU_VF_CONF_PARENT_SHIFT   5	/* Parent PF              */
 
 /* Igu control commands
  */
@@ -37,20 +68,42 @@ enum igu_ctrl_cmd {
  */
 struct igu_ctrl_reg {
 	u32 ctrl_data;
-#define IGU_CTRL_REG_FID_MASK           0xFFFF  /* Opaque_FID	 */
+#define IGU_CTRL_REG_FID_MASK           0xFFFF	/* Opaque_FID    */
 #define IGU_CTRL_REG_FID_SHIFT          0
-#define IGU_CTRL_REG_PXP_ADDR_MASK      0xFFF   /* Command address */
+#define IGU_CTRL_REG_PXP_ADDR_MASK      0x1FFF	/* Command address */
 #define IGU_CTRL_REG_PXP_ADDR_SHIFT     16
-#define IGU_CTRL_REG_RESERVED_MASK      0x1
-#define IGU_CTRL_REG_RESERVED_SHIFT     28
-#define IGU_CTRL_REG_TYPE_MASK          0x1 /* use enum igu_ctrl_cmd */
+#define IGU_CTRL_REG_RESERVED_MASK      0x3
+#define IGU_CTRL_REG_RESERVED_SHIFT     29
+#define IGU_CTRL_REG_TYPE_MASK          0x1	/* use enum igu_ctrl_cmd */
 #define IGU_CTRL_REG_TYPE_SHIFT         31
 };
+
+#endif
+
+struct qed_hwfn;
+struct qed_ptt;
 
 enum qed_coalescing_fsm {
 	QED_COAL_RX_STATE_MACHINE,
 	QED_COAL_TX_STATE_MACHINE
 };
+
+/**
+ * @brief qed_int_cau_conf_pi - configure cau for a given
+ *        status block
+ *
+ * @param p_hwfn
+ * @param p_ptt
+ * @param p_sb
+ * @param pi_index
+ * @param state
+ * @param timeset
+ */
+void qed_int_cau_conf_pi(struct qed_hwfn *p_hwfn,
+			 struct qed_ptt *p_ptt,
+			 struct qed_sb_info *p_sb,
+			 u32 pi_index,
+			 enum qed_coalescing_fsm coalescing_fsm, u8 timeset);
 
 /**
  * @brief qed_int_igu_enable_int - enable device interrupts
@@ -60,8 +113,7 @@ enum qed_coalescing_fsm {
  * @param int_mode - interrupt mode to use
  */
 void qed_int_igu_enable_int(struct qed_hwfn *p_hwfn,
-			    struct qed_ptt *p_ptt,
-			    enum qed_int_mode int_mode);
+			    struct qed_ptt *p_ptt, enum qed_int_mode int_mode);
 
 /**
  * @brief qed_int_igu_disable_int - disable device interrupts
@@ -69,8 +121,7 @@ void qed_int_igu_enable_int(struct qed_hwfn *p_hwfn,
  * @param p_hwfn
  * @param p_ptt
  */
-void qed_int_igu_disable_int(struct qed_hwfn *p_hwfn,
-			     struct qed_ptt *p_ptt);
+void qed_int_igu_disable_int(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
  * @brief qed_int_igu_read_sisr_reg - Reads the single isr multiple dpc
@@ -83,6 +134,7 @@ void qed_int_igu_disable_int(struct qed_hwfn *p_hwfn,
 u64 qed_int_igu_read_sisr_reg(struct qed_hwfn *p_hwfn);
 
 #define QED_SP_SB_ID 0xffff
+
 /**
  * @brief qed_int_sb_init - Initializes the sb_info structure.
  *
@@ -94,7 +146,7 @@ u64 qed_int_igu_read_sisr_reg(struct qed_hwfn *p_hwfn);
  *			allocated) sb_info structure
  * @param sb_virt_addr
  * @param sb_phy_addr
- * @param sb_id	the sb_id to be used (zero based in driver)
+ * @param sb_id		the sb_id to be used (zero based in driver)
  *			should use QED_SP_SB_ID for SP Status block
  *
  * @return int
@@ -102,9 +154,7 @@ u64 qed_int_igu_read_sisr_reg(struct qed_hwfn *p_hwfn);
 int qed_int_sb_init(struct qed_hwfn *p_hwfn,
 		    struct qed_ptt *p_ptt,
 		    struct qed_sb_info *sb_info,
-		    void *sb_virt_addr,
-		    dma_addr_t sb_phy_addr,
-		    u16 sb_id);
+		    void *sb_virt_addr, dma_addr_t sb_phy_addr, u16 sb_id);
 /**
  * @brief qed_int_sb_setup - Setup the sb.
  *
@@ -113,8 +163,7 @@ int qed_int_sb_init(struct qed_hwfn *p_hwfn,
  * @param sb_info	initialized sb_info structure
  */
 void qed_int_sb_setup(struct qed_hwfn *p_hwfn,
-		      struct qed_ptt *p_ptt,
-		      struct qed_sb_info *sb_info);
+		      struct qed_ptt *p_ptt, struct qed_sb_info *sb_info);
 
 /**
  * @brief qed_int_sb_release - releases the sb_info structure.
@@ -130,8 +179,7 @@ void qed_int_sb_setup(struct qed_hwfn *p_hwfn,
  * @return int
  */
 int qed_int_sb_release(struct qed_hwfn *p_hwfn,
-		       struct qed_sb_info *sb_info,
-		       u16 sb_id);
+		       struct qed_sb_info *sb_info, u16 sb_id);
 
 /**
  * @brief qed_int_sp_dpc - To be called when an interrupt is received on the
@@ -140,7 +188,7 @@ int qed_int_sb_release(struct qed_hwfn *p_hwfn,
  * @param p_hwfn - pointer to hwfn
  *
  */
-void qed_int_sp_dpc(struct tasklet_struct *t);
+void qed_int_sp_dpc(long unsigned int hwfn_cookie);
 
 /**
  * @brief qed_int_get_num_sbs - get the number of status
@@ -149,9 +197,9 @@ void qed_int_sp_dpc(struct tasklet_struct *t);
  * @param p_hwfn
  * @param p_sb_cnt_info
  *
- * @return int - number of status blocks configured
+ * @return
  */
-void qed_int_get_num_sbs(struct qed_hwfn	*p_hwfn,
+void qed_int_get_num_sbs(struct qed_hwfn *p_hwfn,
 			 struct qed_sb_cnt_info *p_sb_cnt_info);
 
 /**
@@ -176,6 +224,36 @@ void qed_int_disable_post_isr_release(struct qed_dev *cdev);
 void qed_int_attn_clr_enable(struct qed_dev *cdev, bool clr_enable);
 
 /**
+ * @brief Read debug information regarding a given SB.
+ *
+ * @param p_hwfn
+ * @param p_ptt
+ * @param p_sb - point to Status block for which we want to get info.
+ * @param p_info - pointer to struct to fill with information regarding SB.
+ *
+ * @return 0 if pointer is filled; failure otherwise.
+ */
+int qed_int_get_sb_dbg(struct qed_hwfn *p_hwfn,
+		       struct qed_ptt *p_ptt,
+		       struct qed_sb_info *p_sb,
+		       struct qed_sb_info_dbg *p_info);
+
+/**
+ * @brief - Move a free Status block between PF and child VF
+ *
+ * @param p_hwfn
+ * @param p_ptt
+ * @param sb_id - The PF fastpath vector to be moved [re-assigned if claiming
+ *                from VF, given-up if moving to VF]
+ * @param b_to_vf - PF->VF == true, VF->PF == false
+ *
+ * @return 0 if SB successfully moved.
+ */
+int
+qed_int_igu_relocate_sb(struct qed_hwfn *p_hwfn,
+			struct qed_ptt *p_ptt, u16 sb_id, bool b_to_vf);
+
+/**
  * @brief - Doorbell Recovery handler.
  *          Run doorbell recovery in case of PF overflow (and flush DORQ if
  *          needed).
@@ -183,7 +261,7 @@ void qed_int_attn_clr_enable(struct qed_dev *cdev, bool clr_enable);
  * @param p_hwfn
  * @param p_ptt
  */
-int qed_db_rec_handler(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
+void qed_db_rec_handler(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 #define QED_CAU_DEF_RX_TIMER_RES 0
 #define QED_CAU_DEF_TX_TIMER_RES 0
@@ -192,7 +270,7 @@ int qed_db_rec_handler(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 #define QED_SB_EVENT_MASK       0x0003
 
 #define SB_ALIGNED_SIZE(p_hwfn)	\
-	ALIGNED_TYPE_SIZE(struct status_block_e4, p_hwfn)
+	ALIGNED_TYPE_SIZE(struct status_block, p_hwfn)
 
 #define QED_SB_INVALID_IDX      0xffff
 
@@ -217,8 +295,12 @@ struct qed_igu_info {
 	struct qed_igu_block entry[MAX_TOT_SB_PER_PATH];
 	u16 igu_dsb_id;
 
+	/* The numbers can shift when using APIs to switch SBs between PF and
+	 * VF.
+	 */
 	struct qed_sb_cnt_info usage;
 
+	/* Determine whether we can shift SBs between VFs and PFs */
 	bool b_allow_pf_vf_change;
 };
 
@@ -229,6 +311,15 @@ struct qed_igu_info {
  * @param p_ptt
  */
 int qed_int_igu_reset_cam(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
+
+/**
+ * @brief - Make sure IGU CAM reflects the default resources once again,
+ *          starting with a 'dirty' SW database.
+ * @param p_hwfn
+ * @param p_ptt
+ */
+int qed_int_igu_reset_cam_default(struct qed_hwfn *p_hwfn,
+				  struct qed_ptt *p_ptt);
 
 /**
  * @brief Translate the weakly-defined client sb-id into an IGU sb-id
@@ -251,10 +342,10 @@ u16 qed_get_igu_sb_id(struct qed_hwfn *p_hwfn, u16 sb_id);
 struct qed_igu_block *qed_get_igu_free_sb(struct qed_hwfn *p_hwfn,
 					  bool b_is_pf);
 
+/* TODO Names of function may change... */
 void qed_int_igu_init_pure_rt(struct qed_hwfn *p_hwfn,
 			      struct qed_ptt *p_ptt,
-			      bool b_set,
-			      bool b_slowpath);
+			      bool b_set, bool b_slowpath);
 
 void qed_int_igu_init_rt(struct qed_hwfn *p_hwfn);
 
@@ -269,11 +360,9 @@ void qed_int_igu_init_rt(struct qed_hwfn *p_hwfn);
  *
  * @return int
  */
-int qed_int_igu_read_cam(struct qed_hwfn *p_hwfn,
-			 struct qed_ptt *p_ptt);
+int qed_int_igu_read_cam(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
-typedef int (*qed_int_comp_cb_t)(struct qed_hwfn *p_hwfn,
-				 void *cookie);
+typedef int (*qed_int_comp_cb_t) (struct qed_hwfn * p_hwfn, void *cookie);
 /**
  * @brief qed_int_register_cb - Register callback func for
  *      slowhwfn statusblock.
@@ -296,10 +385,7 @@ typedef int (*qed_int_comp_cb_t)(struct qed_hwfn *p_hwfn,
  */
 int qed_int_register_cb(struct qed_hwfn *p_hwfn,
 			qed_int_comp_cb_t comp_cb,
-			void *cookie,
-			u8 *sb_idx,
-			__le16 **p_fw_cons);
-
+			void *cookie, u8 * sb_idx, __le16 ** p_fw_cons);
 /**
  * @brief qed_int_unregister_cb - Unregisters callback
  *      function from sp sb.
@@ -311,8 +397,7 @@ int qed_int_register_cb(struct qed_hwfn *p_hwfn,
  *
  * @return int
  */
-int qed_int_unregister_cb(struct qed_hwfn *p_hwfn,
-			  u8 pi);
+int qed_int_unregister_cb(struct qed_hwfn *p_hwfn, u8 pi);
 
 /**
  * @brief qed_int_get_sp_sb_id - Get the slowhwfn sb id.
@@ -329,15 +414,13 @@ u16 qed_int_get_sp_sb_id(struct qed_hwfn *p_hwfn);
  *
  * @param p_hwfn
  * @param p_ptt
- * @param igu_sb_id	- igu status block id
+ * @param sb_id		- igu status block id
  * @param opaque	- opaque fid of the sb owner.
- * @param b_set		- set(1) / clear(0)
+ * @param cleanup_set	- set(1) / clear(0)
  */
 void qed_int_igu_init_pure_rt_single(struct qed_hwfn *p_hwfn,
 				     struct qed_ptt *p_ptt,
-				     u16 igu_sb_id,
-				     u16 opaque,
-				     bool b_set);
+				     u16 sb_id, u16 opaque, bool b_set);
 
 /**
  * @brief qed_int_cau_conf - configure cau for a given status
@@ -353,9 +436,7 @@ void qed_int_igu_init_pure_rt_single(struct qed_hwfn *p_hwfn,
 void qed_int_cau_conf_sb(struct qed_hwfn *p_hwfn,
 			 struct qed_ptt *p_ptt,
 			 dma_addr_t sb_phys,
-			 u16 igu_sb_id,
-			 u16 vf_number,
-			 u8 vf_valid);
+			 u16 igu_sb_id, u16 vf_number, u8 vf_valid);
 
 /**
  * @brief qed_int_alloc
@@ -365,8 +446,7 @@ void qed_int_cau_conf_sb(struct qed_hwfn *p_hwfn,
  *
  * @return int
  */
-int qed_int_alloc(struct qed_hwfn *p_hwfn,
-		  struct qed_ptt *p_ptt);
+int qed_int_alloc(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
  * @brief qed_int_free
@@ -381,8 +461,7 @@ void qed_int_free(struct qed_hwfn *p_hwfn);
  * @param p_hwfn
  * @param p_ptt
  */
-void qed_int_setup(struct qed_hwfn *p_hwfn,
-		   struct qed_ptt *p_ptt);
+void qed_int_setup(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
  * @brief - Enable Interrupt & Attention for hw function
@@ -393,8 +472,8 @@ void qed_int_setup(struct qed_hwfn *p_hwfn,
  *
  * @return int
  */
-int qed_int_igu_enable(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
-		       enum qed_int_mode int_mode);
+int qed_int_igu_enable(struct qed_hwfn *p_hwfn,
+		       struct qed_ptt *p_ptt, enum qed_int_mode int_mode);
 
 /**
  * @brief - Initialize CAU status block entry
@@ -407,16 +486,24 @@ int qed_int_igu_enable(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
  */
 void qed_init_cau_sb_entry(struct qed_hwfn *p_hwfn,
 			   struct cau_sb_entry *p_sb_entry,
-			   u8 pf_id,
-			   u16 vf_number,
-			   u8 vf_valid);
+			   u8 pf_id, u16 vf_number, u8 vf_valid);
 
-int qed_int_set_timer_res(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
+int qed_int_set_timer_res(struct qed_hwfn *p_hwfn,
+			  struct qed_ptt *p_ptt,
 			  u8 timer_res, u16 sb_id, bool tx);
+#ifndef ASIC_ONLY
+#define QED_MAPPING_MEMORY_SIZE(dev)			       \
+	((CHIP_REV_IS_SLOW(dev) && (!(dev)->b_is_emul_full)) ? \
+	 136 : NUM_OF_SBS(dev))
+#else
+#define QED_MAPPING_MEMORY_SIZE(dev) NUM_OF_SBS(dev)
+#endif
 
-#define QED_MAPPING_MEMORY_SIZE(dev)	(NUM_OF_SBS(dev))
+int qed_pglueb_rbc_attn_handler(struct qed_hwfn *p_hwfn,
+				struct qed_ptt *p_ptt, bool is_hw_init);
 
-int qed_pglueb_rbc_attn_handler(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
-				bool hw_init);
+int
+qed_int_dummy_comp_cb(struct qed_hwfn __maybe_unused * p_hwfn,
+		      void __maybe_unused * cookie);
 
 #endif

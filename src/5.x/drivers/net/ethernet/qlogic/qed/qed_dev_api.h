@@ -1,18 +1,51 @@
-/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef _QED_DEV_API_H
 #define _QED_DEV_API_H
-
 #include <linux/types.h>
-#include <linux/kernel.h>
+#include <linux/if_ether.h>
 #include <linux/slab.h>
-#include <linux/qed/qed_chain.h>
-#include <linux/qed/qed_if.h>
+#include "qed_chain.h"
 #include "qed_int.h"
+
+#define QED_DEFAULT_ILT_PAGE_SIZE 4
+
+struct qed_wake_info {
+	u32 wk_info;
+	u32 wk_details;
+	u32 wk_pkt_len;
+	u8 wk_buffer[256];
+};
 
 /**
  * @brief qed_init_dp - initialize the debug level
@@ -20,10 +53,28 @@
  * @param cdev
  * @param dp_module
  * @param dp_level
+ * @param dp_ctx
  */
 void qed_init_dp(struct qed_dev *cdev,
-		 u32 dp_module,
-		 u8 dp_level);
+		 u32 dp_module, u8 dp_level, void *dp_ctx);
+
+/**
+ * @brief qed_init_int_dp - initialize the internal debug level
+ *
+ * @param cdev
+ * @param dp_module
+ * @param dp_level
+ */
+void qed_init_int_dp(struct qed_dev *cdev, u32 dp_module, u8 dp_level);
+
+/**
+ * @brief qed_dp_internal_log - store into internal log
+ *
+ * @param cdev
+ * @param buf
+ * @param len
+ */
+void qed_dp_internal_log(struct qed_dev *cdev, char *fmt, ...);
 
 /**
  * @brief qed_init_struct - initialize the device structure to
@@ -31,7 +82,7 @@ void qed_init_dp(struct qed_dev *cdev,
  *
  * @param cdev
  */
-void qed_init_struct(struct qed_dev *cdev);
+int qed_init_struct(struct qed_dev *cdev);
 
 /**
  * @brief qed_resc_free -
@@ -56,6 +107,12 @@ int qed_resc_alloc(struct qed_dev *cdev);
  */
 void qed_resc_setup(struct qed_dev *cdev);
 
+enum qed_mfw_timeout_fallback {
+	QED_TO_FALLBACK_TO_NONE,
+	QED_TO_FALLBACK_TO_DEFAULT,
+	QED_TO_FALLBACK_FAIL_LOAD,
+};
+
 enum qed_override_force_load {
 	QED_OVERRIDE_FORCE_LOAD_NONE,
 	QED_OVERRIDE_FORCE_LOAD_ALWAYS,
@@ -78,6 +135,11 @@ struct qed_drv_load_params {
 #define QED_LOAD_REQ_LOCK_TO_DEFAULT    0
 #define QED_LOAD_REQ_LOCK_TO_NONE       255
 
+	/* Action to take in case the MFW doesn't support timeout values other
+	 * then default and none.
+	 */
+	enum qed_mfw_timeout_fallback mfw_timeout_fallback;
+
 	/* Avoid engine reset when first PF loads on it */
 	bool avoid_eng_reset;
 
@@ -94,14 +156,23 @@ struct qed_hw_init_params {
 	/* Interrupt mode [msix, inta, etc.] to use */
 	enum qed_int_mode int_mode;
 
-	/* NPAR tx switching to be used for vports for tx-switching */
+	/* NPAR tx switching to be used for vports configured for tx-switching */
 	bool allow_npar_tx_switch;
+
+	/* PCI relax ordering to be configured by MFW or qed client */
+	enum qed_pci_rlx_odr pci_rlx_odr_mode;
 
 	/* Binary fw data pointer in binary fw file */
 	const u8 *bin_fw_data;
 
 	/* Driver load parameters */
 	struct qed_drv_load_params *p_drv_load_params;
+
+	/* Avoid engine affinity for RoCE/storage in case of CMT mode */
+	bool avoid_eng_affin;
+
+	/* SPQ block timeout in msec */
+	u32 spq_timeout_ms;
 };
 
 /**
@@ -115,7 +186,7 @@ struct qed_hw_init_params {
 int qed_hw_init(struct qed_dev *cdev, struct qed_hw_init_params *p_params);
 
 /**
- * @brief qed_hw_timers_stop_all - stop the timers HW block
+ * @brief qed_hw_timers_stop_all -
  *
  * @param cdev
  *
@@ -134,8 +205,8 @@ int qed_hw_stop(struct qed_dev *cdev);
 
 /**
  * @brief qed_hw_stop_fastpath -should be called incase
- *		slowpath is still required for the device,
- *		but fastpath is not.
+ *        slowpath is still required for the device,
+ *        but fastpath is not.
  *
  * @param cdev
  *
@@ -145,7 +216,7 @@ int qed_hw_stop_fastpath(struct qed_dev *cdev);
 
 /**
  * @brief qed_hw_start_fastpath -restart fastpath traffic,
- *		only if hw_stop_fastpath was called
+ *        only if hw_stop_fastpath was called
  *
  * @param p_hwfn
  *
@@ -153,17 +224,86 @@ int qed_hw_stop_fastpath(struct qed_dev *cdev);
  */
 int qed_hw_start_fastpath(struct qed_hwfn *p_hwfn);
 
+enum qed_hw_prepare_result {
+	QED_HW_PREPARE_SUCCESS,
+
+	/* FAILED results indicate probe has failed & cleaned up */
+	QED_HW_PREPARE_FAILED_ENG2,
+	QED_HW_PREPARE_FAILED_ME,
+	QED_HW_PREPARE_FAILED_MEM,
+	QED_HW_PREPARE_FAILED_DEV,
+	QED_HW_PREPARE_FAILED_NVM,
+
+	/* BAD results indicate probe is passed even though some wrongness
+	 * has occurred; Trying to actually use [I.e., hw_init()] might have
+	 * dire reprecautions.
+	 */
+	QED_HW_PREPARE_BAD_IOV,
+	QED_HW_PREPARE_BAD_MCP,
+	QED_HW_PREPARE_BAD_IGU,
+};
+
+enum QED_ROCE_EDPM_MODE {
+	QED_ROCE_EDPM_MODE_ENABLE = 0,
+	QED_ROCE_EDPM_MODE_FORCE_ON = 1,
+	QED_ROCE_EDPM_MODE_DISABLE = 2,
+};
+
+struct qed_hw_prepare_params {
+	/* Personality to initialize */
+	int personality;
+
+	/* Force the driver's default resource allocation */
+	bool drv_resc_alloc;
+
+	/* Check the reg_fifo after any register access */
+	bool chk_reg_fifo;
+
+	/* Monitored address by qed_rd()/qed_wr() */
+	u32 monitored_hw_addr;
+
+	/* Request the MFW to initiate PF FLR */
+	bool initiate_pf_flr;
+
+	/* The OS Epoch time in seconds */
+	u32 epoch;
+
+	/* Allow the MFW to collect a crash dump */
+	bool allow_mdump;
+
+	/* Allow prepare to pass even if some initializations are failing.
+	 * If set, the `p_prepare_res' field would be set with the return,
+	 * and might allow probe to pass even if there are certain issues.
+	 */
+	bool b_relaxed_probe;
+	enum qed_hw_prepare_result p_relaxed_res;
+
+	/* Enable/disable request by qed client for pacing */
+	bool b_en_pacing;
+
+	/* Indicates whether this PF serves a storage target */
+	bool b_is_target;
+
+	/* EDPM can be enabled/forced_on/disabled */
+	u8 roce_edpm_mode;
+
+	/* retry count for VF acquire on channel timeout */
+	u8 acquire_retry_cnt;
+
+	/* Num of VF CNQs resources that will be requested */
+	u8 num_vf_cnqs;
+};
 
 /**
  * @brief qed_hw_prepare -
  *
  * @param cdev
- * @param personality - personality to initialize
+ * @param p_params
  *
  * @return int
  */
 int qed_hw_prepare(struct qed_dev *cdev,
-		   int personality);
+		   struct qed_hw_prepare_params *p_params);
 
 /**
  * @brief qed_hw_remove -
@@ -171,6 +311,41 @@ int qed_hw_prepare(struct qed_dev *cdev,
  * @param cdev
  */
 void qed_hw_remove(struct qed_dev *cdev);
+
+/**
+ * @brief qed_set_nwuf_reg -
+ *
+ * @param cdev
+ * @param reg_idx - Index of the pattern register
+ * @param pattern_size - size of pattern
+ * @param crc - CRC value of patter & mask
+ *
+ * @return int
+ */
+int qed_set_nwuf_reg(struct qed_dev *cdev,
+		     u32 reg_idx, u32 pattern_size, u32 crc);
+
+/**
+ * @brief qed_get_wake_info - get magic packet buffer
+ *
+ * @param p_hwfn
+ * @param p_ppt
+ * @param wake_info - pointer to qed_wake_info buffer
+ *
+ * @return int
+ */
+int qed_get_wake_info(struct qed_hwfn *p_hwfn,
+		      struct qed_ptt *p_ptt, struct qed_wake_info *wake_info);
+
+/**
+ * @brief qed_wol_buffer_clear - Clear magic package buffer
+ *
+ * @param p_hwfn
+ * @param p_ptt
+ *
+ * @return void
+ */
+void qed_wol_buffer_clear(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
  * @brief qed_ptt_acquire - Allocate a PTT window
@@ -194,69 +369,45 @@ struct qed_ptt *qed_ptt_acquire(struct qed_hwfn *p_hwfn);
  * @param p_hwfn
  * @param p_ptt
  */
-void qed_ptt_release(struct qed_hwfn *p_hwfn,
-		     struct qed_ptt *p_ptt);
-void qed_reset_vport_stats(struct qed_dev *cdev);
-
-enum qed_dmae_address_type_t {
-	QED_DMAE_ADDRESS_HOST_VIRT,
-	QED_DMAE_ADDRESS_HOST_PHYS,
-	QED_DMAE_ADDRESS_GRC
-};
+void qed_ptt_release(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
- * @brief qed_dmae_host2grc - copy data from source addr to
- * dmae registers using the given ptt
+ * @brief qed_get_dev_name - get device name, e.g., "BB B0"
  *
  * @param p_hwfn
- * @param p_ptt
- * @param source_addr
- * @param grc_addr (dmae_data_offset)
- * @param size_in_dwords
- * @param p_params (default parameters will be used in case of NULL)
+ * @param name - this is where the name will be written to
+ * @param max_chars - maximum chars that can be written to name including '\0'
+ */
+void qed_get_dev_name(struct qed_dev *cdev, u8 * name, u8 max_chars);
+
+void qed_chain_params_init(struct qed_chain_params *p_params,
+			   enum qed_chain_use_mode intended_use,
+			   enum qed_chain_mode mode,
+			   enum qed_chain_cnt_type cnt_type,
+			   u32 num_elems, size_t elem_size);
+/**
+ * @brief qed_chain_alloc - Allocate and initialize a chain
+ *
+ * @param p_hwfn
+ * @param intended_use
+ * @param mode
+ * @param num_elems
+ * @param elem_size
+ * @param p_chain
+ *
+ * @return int
  */
 int
-qed_dmae_host2grc(struct qed_hwfn *p_hwfn,
-		  struct qed_ptt *p_ptt,
-		  u64 source_addr,
-		  u32 grc_addr,
-		  u32 size_in_dwords,
-		  struct qed_dmae_params *p_params);
-
- /**
- * @brief qed_dmae_grc2host - Read data from dmae data offset
- * to source address using the given ptt
- *
- * @param p_ptt
- * @param grc_addr (dmae_data_offset)
- * @param dest_addr
- * @param size_in_dwords
- * @param p_params (default parameters will be used in case of NULL)
- */
-int qed_dmae_grc2host(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
-		      u32 grc_addr, dma_addr_t dest_addr, u32 size_in_dwords,
-		      struct qed_dmae_params *p_params);
+qed_chain_alloc(struct qed_dev *cdev,
+		struct qed_chain *p_chain, struct qed_chain_params *p_params);
 
 /**
- * @brief qed_dmae_host2host - copy data from to source address
- * to a destination adress (for SRIOV) using the given ptt
+ * @brief qed_chain_free - Free chain DMA memory
  *
  * @param p_hwfn
- * @param p_ptt
- * @param source_addr
- * @param dest_addr
- * @param size_in_dwords
- * @param p_params (default parameters will be used in case of NULL)
+ * @param p_chain
  */
-int qed_dmae_host2host(struct qed_hwfn *p_hwfn,
-		       struct qed_ptt *p_ptt,
-		       dma_addr_t source_addr,
-		       dma_addr_t dest_addr,
-		       u32 size_in_dwords, struct qed_dmae_params *p_params);
-
-int qed_chain_alloc(struct qed_dev *cdev, struct qed_chain *chain,
-		    struct qed_chain_init_params *params);
-void qed_chain_free(struct qed_dev *cdev, struct qed_chain *chain);
+void qed_chain_free(struct qed_dev *cdev, struct qed_chain *p_chain);
 
 /**
  * @@brief qed_fw_l2_queue - Get absolute L2 queue ID
@@ -267,9 +418,7 @@ void qed_chain_free(struct qed_dev *cdev, struct qed_chain *chain);
  *
  *  @return int
  */
-int qed_fw_l2_queue(struct qed_hwfn *p_hwfn,
-		    u16 src_id,
-		    u16 *dst_id);
+int qed_fw_l2_queue(struct qed_hwfn *p_hwfn, u16 src_id, u16 * dst_id);
 
 /**
  * @@brief qed_fw_vport - Get absolute vport ID
@@ -280,9 +429,7 @@ int qed_fw_l2_queue(struct qed_hwfn *p_hwfn,
  *
  *  @return int
  */
-int qed_fw_vport(struct qed_hwfn *p_hwfn,
-		 u8 src_id,
-		 u8 *dst_id);
+int qed_fw_vport(struct qed_hwfn *p_hwfn, u8 src_id, u8 * dst_id);
 
 /**
  * @@brief qed_fw_rss_eng - Get absolute RSS engine ID
@@ -293,9 +440,7 @@ int qed_fw_vport(struct qed_hwfn *p_hwfn,
  *
  *  @return int
  */
-int qed_fw_rss_eng(struct qed_hwfn *p_hwfn,
-		   u8 src_id,
-		   u8 *dst_id);
+int qed_fw_rss_eng(struct qed_hwfn *p_hwfn, u8 src_id, u8 * dst_id);
 
 /**
  * @brief qed_llh_get_num_ppfid - Return the allocated number of LLH filter
@@ -312,6 +457,15 @@ enum qed_eng {
 	QED_ENG1,
 	QED_BOTH_ENG,
 };
+
+/**
+ * @brief qed_llh_get_l2_affinity_hint - Return the hint for the L2 affinity
+ *
+ * @param cdev
+ *
+ * @return enum qed_eng - L2 affintiy hint
+ */
+enum qed_eng qed_llh_get_l2_affinity_hint(struct qed_dev *cdev);
 
 /**
  * @brief qed_llh_set_ppfid_affinity - Set the engine affinity for the given
@@ -343,6 +497,8 @@ int qed_llh_set_roce_affinity(struct qed_dev *cdev, enum qed_eng eng);
  * @param cdev
  * @param ppfid - relative within the allocated ppfids ('0' is the default one).
  * @param mac_addr - MAC to add
+ *
+ * @return int
  */
 int qed_llh_add_mac_filter(struct qed_dev *cdev,
 			   u8 ppfid, u8 mac_addr[ETH_ALEN]);
@@ -351,8 +507,9 @@ int qed_llh_add_mac_filter(struct qed_dev *cdev,
  * @brief qed_llh_remove_mac_filter - Remove a LLH MAC filter from the given
  *	filter bank.
  *
- * @param p_ptt
- * @param p_filter - MAC to remove
+ * @param cdev
+ * @param ppfid - relative within the allocated ppfids ('0' is the default one).
+ * @param mac_addr - MAC to remove
  */
 void qed_llh_remove_mac_filter(struct qed_dev *cdev,
 			       u8 ppfid, u8 mac_addr[ETH_ALEN]);
@@ -376,7 +533,8 @@ enum qed_llh_prot_filter_type_t {
  * @param type - type of filters and comparing
  * @param source_port_or_eth_type - source port or ethertype to add
  * @param dest_port - destination port to add
- * @param type - type of filters and comparing
+ *
+ * @return int
  */
 int
 qed_llh_add_protocol_filter(struct qed_dev *cdev,
@@ -394,11 +552,35 @@ qed_llh_add_protocol_filter(struct qed_dev *cdev,
  * @param source_port_or_eth_type - source port or ethertype to add
  * @param dest_port - destination port to add
  */
-void
-qed_llh_remove_protocol_filter(struct qed_dev *cdev,
-			       u8 ppfid,
-			       enum qed_llh_prot_filter_type_t type,
-			       u16 source_port_or_eth_type, u16 dest_port);
+void qed_llh_remove_protocol_filter(struct qed_dev *cdev,
+				    u8 ppfid,
+				    enum qed_llh_prot_filter_type_t type,
+				    u16 source_port_or_eth_type, u16 dest_port);
+
+/**
+ * @brief qed_llh_clear_ppfid_filters - Remove all LLH filters from the given
+ *	filter bank.
+ *
+ * @param cdev
+ * @param ppfid - relative within the allocated ppfids ('0' is the default one).
+ */
+void qed_llh_clear_ppfid_filters(struct qed_dev *cdev, u8 ppfid);
+
+/**
+ * @brief qed_llh_clear_all_filters - Remove all LLH filters
+ *
+ * @param cdev
+ */
+void qed_llh_clear_all_filters(struct qed_dev *cdev);
+
+/**
+ * @brief qed_llh_set_function_as_default - set function as defult per port
+ *
+ * @param p_hwfn
+ * @param p_ptt
+ */
+int
+qed_llh_set_function_as_default(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
  * *@brief Cleanup of previous driver remains prior to load
@@ -422,7 +604,7 @@ int qed_final_cleanup(struct qed_hwfn *p_hwfn,
  *
  * @return int
  **/
-int qed_get_queue_coalesce(struct qed_hwfn *p_hwfn, u16 *coal, void *handle);
+int qed_get_queue_coalesce(struct qed_hwfn *p_hwfn, u16 * coal, void *handle);
 
 /**
  * @brief qed_set_queue_coalesce - Configure coalesce parameters for Rx and
@@ -433,7 +615,7 @@ int qed_get_queue_coalesce(struct qed_hwfn *p_hwfn, u16 *coal, void *handle);
  *    should be in same range [i.e., either 0-0x7f, 0x80-0xff or 0x100-0x1ff]
  *    otherwise configuration would break.
  *
- *
+ * @param p_hwfn
  * @param rx_coal - Rx Coalesce value in micro seconds.
  * @param tx_coal - TX Coalesce value in micro seconds.
  * @param p_handle
@@ -441,7 +623,18 @@ int qed_get_queue_coalesce(struct qed_hwfn *p_hwfn, u16 *coal, void *handle);
  * @return int
  **/
 int
-qed_set_queue_coalesce(u16 rx_coal, u16 tx_coal, void *p_handle);
+qed_set_queue_coalesce(struct qed_hwfn *p_hwfn,
+		       u16 rx_coal, u16 tx_coal, void *p_handle);
+
+/**
+ * @brief - Recalculate feature distributions based on HW resources and
+ * user inputs. Currently this affects RDMA_CNQ, PF_L2_QUE and VF_L2_QUE.
+ * As a result, this must not be called while RDMA is active or while VFs
+ * are enabled.
+ *
+ * @param p_hwfn
+ */
+void qed_hw_set_feat(struct qed_hwfn *p_hwfn);
 
 /**
  * @brief qed_pglueb_set_pfid_enable - Enable or disable PCI BUS MASTER
@@ -466,7 +659,7 @@ int qed_pglueb_set_pfid_enable(struct qed_hwfn *p_hwfn,
  * @param db_space - doorbell recovery addresses are user or kernel space
  */
 int qed_db_recovery_add(struct qed_dev *cdev,
-			void __iomem *db_addr,
+			void __iomem * db_addr,
 			void *db_data,
 			enum qed_db_rec_width db_width,
 			enum qed_db_rec_space db_space);
@@ -481,8 +674,139 @@ int qed_db_recovery_add(struct qed_dev *cdev,
  *                  entry to delete.
  */
 int qed_db_recovery_del(struct qed_dev *cdev,
-			void __iomem *db_addr, void *db_data);
+			void __iomem * db_addr, void *db_data);
 
+/**
+ * @brief qed_set_dev_access_enable - Enable or disable access to the device
+ *
+ * @param p_hwfn
+ * @param b_enable - true/false
+ */
+void qed_set_dev_access_enable(struct qed_dev *cdev, bool b_enable);
 
-const char *qed_hw_get_resc_name(enum qed_resources res_id);
+/**
+ * @brief qed_set_ilt_page_size - Set ILT page size
+ *
+ * @param cdev
+ * @param ilt_size
+ *
+ * @return int
+ */
+void qed_set_ilt_page_size(struct qed_dev *cdev, u8 ilt_size);
+
+/**
+ * @brief Create Lag
+ *
+ *        two ports of the same device are bonded or unbonded,
+ *        or link status changes.
+ *
+ * @param lag_type: LAG_TYPE_NONE: Disable lag
+ *               LAG_TYPE_ACTIVEACTIVE: Utilize all ports
+ *               LAG_TYPE_ACTIVEBACKUP: Configure all queues to
+ *               active port
+ * @param active_ports: Bitmap, each bit represents whether the
+ *               port is active or not (1 - active )
+ * @param link_change_cb: Callback function to call if port
+ *              settings change such as dcbx.
+ * @param cxt:	Parameter will be passed to the
+ *              link_change_cb function
+ *
+ * @param p_hwfn
+ * @return int
+ */
+int qed_lag_create(struct qed_dev *dev,
+		   enum qed_lag_type lag_type,
+		   void (*link_change_cb) (void *cxt),
+		   void *cxt, u8 active_ports);
+/**
+ * @brief Modify lag link status of a given port
+ *
+ * @param port_id: the port id that change
+ * @param link_active: current link state
+ */
+int qed_lag_modify(struct qed_dev *dev, u8 port_id, u8 link_active);
+
+/**
+ * @brief Exit lag mode
+ *
+ * @param p_hwfn
+ */
+int qed_lag_destroy(struct qed_dev *dev);
+
+bool qed_lag_is_active(struct qed_hwfn *p_hwfn);
+
+/**
+ * @brief Whether FIP discovery fallback special mode is enabled or not.
+ *
+ * @param cdev
+ *
+ * @return true if device is in FIP special mode, false otherwise.
+ */
+bool qed_is_mf_fip_special(struct qed_dev *cdev);
+
+/**
+ * @brief Whether device allows DSCP to TC mapping or not.
+ *
+ * @param cdev
+ *
+ * @return true if device allows dscp to tc mapping.
+ */
+bool qed_is_dscp_to_tc_capable(struct qed_dev *cdev);
+
+/**
+ * @brief Returns the number of PFs.
+ *
+ * @param p_hwfn
+ *
+ * @return u8 - Number of PFs.
+ */
+u8 qed_get_num_funcs_on_engine(struct qed_hwfn *p_hwfn);
+
+int
+qed_qm_update_rt_wfq_of_pqset(struct qed_hwfn *p_hwfn,
+			      u16 pq_set_id, u8 tc, u32 min_bw);
+
+int
+qed_qm_update_rt_rl_of_pqset(struct qed_hwfn *p_hwfn,
+			     u16 pq_set_id, u32 max_bw);
+
+int
+qed_qm_update_wfq_of_pqset(struct qed_hwfn *p_hwfn,
+			   struct qed_ptt *p_ptt,
+			   u16 pq_set_id, u8 tc, u32 min_bw);
+
+int
+qed_qm_update_rl_of_pqset(struct qed_hwfn *p_hwfn,
+			  struct qed_ptt *p_ptt, u16 pq_set_id, u32 max_bw);
+
+int
+qed_qm_connect_pqset_to_wfq(struct qed_hwfn *p_hwfn,
+			    struct qed_ptt *p_ptt,
+			    u16 pq_set_id, u8 tc, u16 wfq_id);
+
+int
+qed_qm_connect_pqset_to_rl(struct qed_hwfn *p_hwfn,
+			   struct qed_ptt *p_ptt,
+			   u16 pq_set_id, u8 tc, u8 rl_id);
+
+int
+qed_qm_get_wfq_of_pqset(struct qed_hwfn *p_hwfn,
+			struct qed_ptt *p_ptt,
+			u16 pq_set_id, u8 tc, u16 * p_wfq_id);
+
+int
+qed_qm_get_rl_of_pqset(struct qed_hwfn *p_hwfn,
+		       struct qed_ptt *p_ptt,
+		       u16 pq_set_id, u8 tc, u16 * p_rl_id);
+
+int
+qed_qm_config_pq_wfq(struct qed_hwfn *p_hwfn,
+		     struct qed_ptt *p_ptt, u16 abs_pq_id, u16 wfq_id);
+
+int
+qed_qm_config_pq_rl(struct qed_hwfn *p_hwfn,
+		    struct qed_ptt *p_ptt, u16 abs_pq_id, u8 rl_id);
+
+void qed_qm_acquire_access(struct qed_hwfn *p_hwfn);
+void qed_qm_release_access(struct qed_hwfn *p_hwfn);
 #endif

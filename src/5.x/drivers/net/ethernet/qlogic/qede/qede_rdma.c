@@ -1,15 +1,42 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
-/* QLogic qedr NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include <linux/pci.h>
 #include <linux/netdevice.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
-#include <linux/qed/qede_rdma.h>
+
 #include "qede.h"
+#include "qede_rdma.h"
 
 static struct qedr_driver *qedr_drv;
 static LIST_HEAD(qedr_dev_list);
@@ -20,15 +47,13 @@ bool qede_rdma_supported(struct qede_dev *dev)
 	return dev->dev_info.common.rdma_supported;
 }
 
-static void _qede_rdma_dev_add(struct qede_dev *edev)
+struct qedr_dev *_qede_rdma_dev_add(struct qede_dev *edev, bool lag_enable)
 {
 	if (!qedr_drv)
-		return;
+		return NULL;
 
-	/* Leftovers from previous error recovery */
-	edev->rdma_info.exp_recovery = false;
-	edev->rdma_info.qedr_dev = qedr_drv->add(edev->cdev, edev->pdev,
-						 edev->ndev);
+	return qedr_drv->add(edev->cdev, edev->pdev, edev->ndev, lag_enable,
+			     IS_VF(edev));
 }
 
 static int qede_rdma_create_wq(struct qede_dev *edev)
@@ -83,15 +108,17 @@ static void qede_rdma_destroy_wq(struct qede_dev *edev)
 	edev->rdma_info.rdma_wq = NULL;
 }
 
-int qede_rdma_dev_add(struct qede_dev *edev, bool recovery)
+int qede_rdma_dev_add(struct qede_dev *edev, enum qede_rdma_probe_mode mode)
 {
-	int rc;
+	struct qede_dev *temp_edev;
+	bool lag_dev = false;
+	int rc = 0;
 
 	if (!qede_rdma_supported(edev))
 		return 0;
 
-	/* Cannot start qedr while recovering since it wasn't fully stopped */
-	if (recovery)
+	/* recovery cannot start qedr, cuz it wasn't fully stopped */
+	if (mode == QEDE_RDMA_PROBE_RECOVERY)
 		return 0;
 
 	rc = qede_rdma_create_wq(edev);
@@ -101,43 +128,58 @@ int qede_rdma_dev_add(struct qede_dev *edev, bool recovery)
 	INIT_LIST_HEAD(&edev->rdma_info.entry);
 	mutex_lock(&qedr_dev_list_lock);
 	list_add_tail(&edev->rdma_info.entry, &qedr_dev_list);
-	_qede_rdma_dev_add(edev);
+
+	list_for_each_entry(temp_edev, &qedr_dev_list, rdma_info.entry) {
+		if (temp_edev->rdma_info.lag_enabled &&
+		    (PCI_FUNC(temp_edev->pdev->devfn) % 2 == 0)) {
+			DP_NOTICE(temp_edev,
+				  "Found LAG enabled while probing qede devices\n");
+			lag_dev = true;
+		}
+	}
+
+	if (!(lag_dev && PCI_FUNC(edev->pdev->devfn) % 2 == 1))
+		edev->rdma_info.qedr_dev = _qede_rdma_dev_add(edev, lag_dev);
+	else
+		DP_NOTICE(edev,
+			  "Skipping adding odd PCI functions, LAG enabled\n");
+
 	mutex_unlock(&qedr_dev_list_lock);
 
 	return rc;
 }
 
-static void _qede_rdma_dev_remove(struct qede_dev *edev)
+void _qede_rdma_dev_remove(struct qede_dev *edev,
+			   enum qede_rdma_remove_mode mode)
 {
 	if (qedr_drv && qedr_drv->remove && edev->rdma_info.qedr_dev)
-		qedr_drv->remove(edev->rdma_info.qedr_dev);
+		qedr_drv->remove(edev->rdma_info.qedr_dev, mode);
 }
 
-void qede_rdma_dev_remove(struct qede_dev *edev, bool recovery)
+void qede_rdma_dev_remove(struct qede_dev *edev,
+			  enum qede_rdma_remove_mode mode)
 {
 	if (!qede_rdma_supported(edev))
 		return;
 
-	/* Cannot remove qedr while recovering since it wasn't fully stopped */
-	if (!recovery) {
+	/* In case of recovery we destroy the WQ only once */
+	if (!edev->rdma_info.exp_recovery)
 		qede_rdma_destroy_wq(edev);
-		mutex_lock(&qedr_dev_list_lock);
-		if (!edev->rdma_info.exp_recovery)
-			_qede_rdma_dev_remove(edev);
+
+	if (mode == QEDE_RDMA_REMOVE_RECOVERY)
+		edev->rdma_info.exp_recovery = true;
+
+	mutex_lock(&qedr_dev_list_lock);
+	_qede_rdma_dev_remove(edev, mode);
+	/* recovery cannot remove qedr, cuz it wasn't fully stopped */
+	if (mode == QEDE_RDMA_REMOVE_NORMAL) {
 		edev->rdma_info.qedr_dev = NULL;
 		list_del(&edev->rdma_info.entry);
-		mutex_unlock(&qedr_dev_list_lock);
-	} else {
-		if (!edev->rdma_info.exp_recovery) {
-			mutex_lock(&qedr_dev_list_lock);
-			_qede_rdma_dev_remove(edev);
-			mutex_unlock(&qedr_dev_list_lock);
-		}
-		edev->rdma_info.exp_recovery = true;
 	}
+	mutex_unlock(&qedr_dev_list_lock);
 }
 
-static void _qede_rdma_dev_open(struct qede_dev *edev)
+void _qede_rdma_dev_open(struct qede_dev *edev)
 {
 	if (qedr_drv && edev->rdma_info.qedr_dev && qedr_drv->notify)
 		qedr_drv->notify(edev->rdma_info.qedr_dev, QEDE_UP);
@@ -169,20 +211,11 @@ static void qede_rdma_dev_close(struct qede_dev *edev)
 	mutex_unlock(&qedr_dev_list_lock);
 }
 
-static void qede_rdma_dev_shutdown(struct qede_dev *edev)
-{
-	if (!qede_rdma_supported(edev))
-		return;
-
-	mutex_lock(&qedr_dev_list_lock);
-	if (qedr_drv && edev->rdma_info.qedr_dev && qedr_drv->notify)
-		qedr_drv->notify(edev->rdma_info.qedr_dev, QEDE_CLOSE);
-	mutex_unlock(&qedr_dev_list_lock);
-}
-
 int qede_rdma_register_driver(struct qedr_driver *drv)
 {
+	struct net_device *ndev;
 	struct qede_dev *edev;
+	bool lag_dev;
 	u8 qedr_counter = 0;
 
 	mutex_lock(&qedr_dev_list_lock);
@@ -193,10 +226,20 @@ int qede_rdma_register_driver(struct qedr_driver *drv)
 	qedr_drv = drv;
 
 	list_for_each_entry(edev, &qedr_dev_list, rdma_info.entry) {
-		struct net_device *ndev;
+		lag_dev = edev->rdma_info.lag_enabled;
 
-		qedr_counter++;
-		_qede_rdma_dev_add(edev);
+		if (lag_dev) {
+			if (PCI_FUNC(edev->pdev->devfn) % 2 == 0)
+				DP_NOTICE(edev,
+					  "Found LAG enabled during qedr load\n");
+			else /* In case LAG is supported, rdma device should be created only for even PFs*/
+				continue;
+		}
+
+		edev->rdma_info.qedr_dev = _qede_rdma_dev_add(edev, lag_dev);
+		if (edev->rdma_info.qedr_dev)
+			qedr_counter++;
+
 		ndev = edev->ndev;
 		if (netif_running(ndev) && netif_oper_up(ndev))
 			_qede_rdma_dev_open(edev);
@@ -216,9 +259,10 @@ void qede_rdma_unregister_driver(struct qedr_driver *drv)
 
 	mutex_lock(&qedr_dev_list_lock);
 	list_for_each_entry(edev, &qedr_dev_list, rdma_info.entry) {
-		/* If device has experienced recovery it was already removed */
-		if (edev->rdma_info.qedr_dev && !edev->rdma_info.exp_recovery)
-			_qede_rdma_dev_remove(edev);
+		if (edev->rdma_info.qedr_dev) {
+			_qede_rdma_dev_remove(edev, QEDE_RDMA_REMOVE_NORMAL);
+			edev->rdma_info.qedr_dev = NULL;
+		}
 	}
 	qedr_drv = NULL;
 	mutex_unlock(&qedr_dev_list_lock);
@@ -290,9 +334,6 @@ static void qede_rdma_handle_event(struct work_struct *work)
 	case QEDE_DOWN:
 		qede_rdma_dev_close(edev);
 		break;
-	case QEDE_CLOSE:
-		qede_rdma_dev_shutdown(edev);
-		break;
 	case QEDE_CHANGE_ADDR:
 		qede_rdma_changeaddr(edev);
 		break;
@@ -300,7 +341,7 @@ static void qede_rdma_handle_event(struct work_struct *work)
 		qede_rdma_change_mtu(edev);
 		break;
 	default:
-		DP_NOTICE(edev, "Invalid rdma event %d", event);
+		DP_NOTICE(edev, "qede: Invalid rdma event %d", event);
 	}
 }
 
@@ -324,15 +365,13 @@ static void qede_rdma_add_event(struct qede_dev *edev,
 
 	event_node = qede_rdma_get_free_event_node(edev);
 	if (!event_node)
-		goto out;
+		return;
 
 	event_node->event = event;
 	event_node->ptr = edev;
 
 	INIT_WORK(&event_node->work, qede_rdma_handle_event);
 	queue_work(edev->rdma_info.rdma_wq, &event_node->work);
-
-out:
 	kref_put(&edev->rdma_info.refcnt, qede_rdma_complete_event);
 }
 
@@ -355,3 +394,4 @@ void qede_rdma_event_change_mtu(struct qede_dev *edev)
 {
 	qede_rdma_add_event(edev, QEDE_CHANGE_MTU);
 }
+

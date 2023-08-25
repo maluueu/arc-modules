@@ -1,22 +1,50 @@
-/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
-/* QLogic qed NIC Driver
- * Copyright (c) 2015-2017  QLogic Corporation
- * Copyright (c) 2019-2020 Marvell International Ltd.
+/* QLogic (R)NIC Driver/Library
+ * Copyright (c) 2010-2017  Cavium, Inc.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef _QED_CXT_H
 #define _QED_CXT_H
-
 #include <linux/types.h>
+#include <linux/delay.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
-#include <linux/qed/qed_if.h>
 #include "qed_hsi.h"
-#include "qed.h"
+#include "qed_if.h"
+
+struct qed_hwfn;
 
 struct qed_cxt_info {
-	void			*p_cxt;
-	u32			iid;
-	enum protocol_type	type;
+	void *p_cxt;
+	u32 iid;
+	enum protocol_type type;
 };
 
 #define MAX_TID_BLOCKS                  512
@@ -36,8 +64,7 @@ struct qed_tid_mem {
  *
  * @return int
  */
-int qed_cxt_get_cid_info(struct qed_hwfn *p_hwfn,
-			 struct qed_cxt_info *p_info);
+int qed_cxt_get_cid_info(struct qed_hwfn *p_hwfn, struct qed_cxt_info *p_info);
 
 /**
  * @brief qed_cxt_get_tid_mem_info
@@ -50,9 +77,15 @@ int qed_cxt_get_cid_info(struct qed_hwfn *p_hwfn,
 int qed_cxt_get_tid_mem_info(struct qed_hwfn *p_hwfn,
 			     struct qed_tid_mem *p_info);
 
-#define QED_CXT_ISCSI_TID_SEG	PROTOCOLID_ISCSI
-#define QED_CXT_ROCE_TID_SEG	PROTOCOLID_ROCE
-#define QED_CXT_FCOE_TID_SEG	PROTOCOLID_FCOE
+#ifndef _QED_CID_
+#define _QED_CID_
+
+/* Tasks segments definitions  */
+#define QED_CXT_ISCSI_TID_SEG                   PROTOCOLID_ISCSI	/* 0 */
+#define QED_CXT_FCOE_TID_SEG                    PROTOCOLID_FCOE	/* 1 */
+#define QED_CXT_ROCE_TID_SEG                    PROTOCOLID_ROCE	/* 2 */
+#define QED_CXT_ETH_TID_SEG                     PROTOCOLID_ETH	/* 3 */
+
 enum qed_cxt_elem_type {
 	QED_ELEM_CXT,
 	QED_ELEM_SRQ,
@@ -60,14 +93,27 @@ enum qed_cxt_elem_type {
 	QED_ELEM_XRC_SRQ,
 };
 
+enum qed_iov_is_vf_or_pf;
+
 u32 qed_cxt_get_proto_cid_count(struct qed_hwfn *p_hwfn,
-				enum protocol_type type, u32 *vf_cid);
+				enum protocol_type type, u32 * vf_cid);
+
+u32 qed_cxt_get_proto_tid_count(struct qed_hwfn *p_hwfn,
+				enum protocol_type type, u8 vf_id);
+
+u32 qed_cxt_get_proto_cid_start(struct qed_hwfn *p_hwfn,
+				enum protocol_type type, u8 vf_id);
+
+u32 qed_cxt_get_srq_count(struct qed_hwfn *p_hwfn,
+			  enum qed_iov_is_vf_or_pf is_vf);
+
+u32 qed_cxt_get_xrc_srq_count(struct qed_hwfn *p_hwfn);
 
 /**
  * @brief qed_cxt_set_pf_params - Set the PF params for cxt init
  *
  * @param p_hwfn
- * @param rdma_tasks - requested maximum
+ *
  * @return int
  */
 int qed_cxt_set_pf_params(struct qed_hwfn *p_hwfn, u32 rdma_tasks);
@@ -80,7 +126,7 @@ int qed_cxt_set_pf_params(struct qed_hwfn *p_hwfn, u32 rdma_tasks);
  *
  * @return int
  */
-int qed_cxt_cfg_ilt_compute(struct qed_hwfn *p_hwfn, u32 *last_line);
+int qed_cxt_cfg_ilt_compute(struct qed_hwfn *p_hwfn, u32 * last_line);
 
 /**
  * @brief qed_cxt_cfg_ilt_compute_excess - how many lines can be decreased
@@ -125,8 +171,6 @@ void qed_cxt_mngr_setup(struct qed_hwfn *p_hwfn);
 /**
  * @brief qed_cxt_hw_init_common - Initailze ILT and DQ, common phase, per path.
  *
- *
- *
  * @param p_hwfn
  */
 void qed_cxt_hw_init_common(struct qed_hwfn *p_hwfn);
@@ -159,7 +203,15 @@ void qed_qm_init_pf(struct qed_hwfn *p_hwfn,
  */
 int qed_qm_reconf(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
-#define QED_CXT_PF_CID (0xff)
+/**
+ * @brief Reconfigures QM from a non-sleepable context.
+ *
+ * @param p_hwfn
+ * @param p_ptt
+ *
+ * @return int
+ */
+int qed_qm_reconf_intr(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
  * @brief qed_cxt_release - Release a cid
@@ -188,11 +240,11 @@ void _qed_cxt_release_cid(struct qed_hwfn *p_hwfn, u32 cid, u8 vfid);
  * @return int
  */
 int qed_cxt_acquire_cid(struct qed_hwfn *p_hwfn,
-			enum protocol_type type, u32 *p_cid);
+			enum protocol_type type, u32 * p_cid);
 
 /**
  * @brief _qed_cxt_acquire - Acquire a new cid of a specific protocol type
- *                           for a vf-queue
+ *                             for a vf-queue
  *
  * @param p_hwfn
  * @param type
@@ -202,20 +254,46 @@ int qed_cxt_acquire_cid(struct qed_hwfn *p_hwfn,
  * @return int
  */
 int _qed_cxt_acquire_cid(struct qed_hwfn *p_hwfn,
-			 enum protocol_type type, u32 *p_cid, u8 vfid);
+			 enum protocol_type type, u32 * p_cid, u8 vfid);
 
-int qed_cxt_dynamic_ilt_alloc(struct qed_hwfn *p_hwfn,
-			      enum qed_cxt_elem_type elem_type, u32 iid);
-u32 qed_cxt_get_proto_tid_count(struct qed_hwfn *p_hwfn,
-				enum protocol_type type);
-u32 qed_cxt_get_proto_cid_start(struct qed_hwfn *p_hwfn,
-				enum protocol_type type);
-int qed_cxt_free_proto_ilt(struct qed_hwfn *p_hwfn, enum protocol_type proto);
+/**
+ * @brief qed_cxt_get_tid_mem_info - function checks if the
+ *        page containing the iid in the ilt is already
+ *        allocated, if it is not it allocates the page.
+ *
+ * @param p_hwfn
+ * @param elem_type
+ * @param iid
+ * @param vf_id
+ *
+ * @return int
+ */
+int
+qed_cxt_dynamic_ilt_alloc(struct qed_hwfn *p_hwfn,
+			  enum qed_cxt_elem_type elem_type, u32 iid, u8 vf_id);
+
+/**
+ * @brief qed_cxt_free_ilt_range - function frees ilt pages
+ *        associated with the protocol and element type passed.
+ *
+ * @param p_hwfn
+ * @param proto
+ *
+ * @return int
+ */
+int
+qed_cxt_free_ilt_range(struct qed_hwfn *p_hwfn,
+		       enum qed_cxt_elem_type elem_type,
+		       u32 start_iid, u32 count, u8 vf_id);
 
 #define QED_CTX_WORKING_MEM 0
 #define QED_CTX_FL_MEM 1
 int qed_cxt_get_task_ctx(struct qed_hwfn *p_hwfn,
 			 u32 tid, u8 ctx_type, void **task_ctx);
+
+u32 qed_cxt_get_ilt_page_size(struct qed_hwfn *p_hwfn);
+
+u32 qed_cxt_get_total_srq_count(struct qed_hwfn *p_hwfn);
 
 /* Max number of connection types in HW (DQ/CDU etc.) */
 #define MAX_CONN_TYPES          PROTOCOLID_COMMON
@@ -281,10 +359,13 @@ struct qed_ilt_client_cfg {
 	u32 vf_total_lines;
 };
 
+#define MAP_WORD_SIZE           sizeof(unsigned long)
+#define BITS_PER_MAP_WORD       (MAP_WORD_SIZE * 8)
+
 struct qed_cid_acquired_map {
-	u32		start_cid;
-	u32		max_count;
-	unsigned long	*cid_map;
+	u32 start_cid;
+	u32 max_count;
+	unsigned long *cid_map;
 };
 
 struct qed_src_t2 {
@@ -296,10 +377,10 @@ struct qed_src_t2 {
 
 struct qed_cxt_mngr {
 	/* Per protocl configuration */
-	struct qed_conn_type_cfg	conn_cfg[MAX_CONN_TYPES];
+	struct qed_conn_type_cfg conn_cfg[MAX_CONN_TYPES];
 
 	/* computed ILT structure */
-	struct qed_ilt_client_cfg	clients[MAX_ILT_CLIENTS];
+	struct qed_ilt_client_cfg clients[MAX_ILT_CLIENTS];
 
 	/* Task type sizes */
 	u32 task_type_size[NUM_TASK_TYPES];
@@ -311,12 +392,10 @@ struct qed_cxt_mngr {
 	u32 first_vf_in_pf;
 
 	/* Acquired CIDs */
-	struct qed_cid_acquired_map	acquired[MAX_CONN_TYPES];
+	struct qed_cid_acquired_map acquired[MAX_CONN_TYPES];
+	struct qed_cid_acquired_map *acquired_vf[MAX_CONN_TYPES];
 
-	struct qed_cid_acquired_map
-	acquired_vf[MAX_CONN_TYPES][MAX_NUM_VFS];
-
-	/* ILT  shadow table */
+	/* ILT shadow table */
 	struct phys_mem_desc *ilt_shadow;
 	u32 ilt_shadow_size;
 	u32 pf_start_line;
@@ -324,17 +403,33 @@ struct qed_cxt_mngr {
 	/* Mutex for a dynamic ILT allocation */
 	struct mutex mutex;
 
-	/* SRC T2 */
 	struct qed_src_t2 src_t2;
+	struct qed_src_t2 gfs_t2[MAX_GFS_MODULE_TYPE];
+
+	/* The infrastructure originally was very generic and context/task
+	 * oriented - per connection-type we would set how many of those
+	 * are needed, and later when determining how much memory we're
+	 * needing for a given block we'd iterate over all the relevant
+	 * connection-types.
+	 * But since then we've had some additional resources, some of which
+	 * require memory which is indepent of the general context/task
+	 * scheme. We add those here explicitly per-feature.
+	 */
 
 	/* total number of SRQ's for this hwfn */
 	u32 srq_count;
 	u32 xrc_srq_count;
+	u32 vfs_srq_count;
 
 	/* Maximal number of L2 steering filters */
 	u32 arfs_count;
 
-	u8 task_type_id;
+	/* TODO - VF arfs filters ? */
+
+	u16 iscsi_task_pages;
+	u16 fcoe_task_pages;
+	u16 roce_task_pages;
+	u16 eth_task_pages;
 	u16 task_ctx_size;
 	u16 conn_ctx_size;
 };
@@ -344,9 +439,6 @@ u16 qed_get_cdut_num_vf_init_pages(struct qed_hwfn *p_hwfn);
 u16 qed_get_cdut_num_pf_work_pages(struct qed_hwfn *p_hwfn);
 u16 qed_get_cdut_num_vf_work_pages(struct qed_hwfn *p_hwfn);
 
-u32 qed_cxt_get_ilt_page_size(struct qed_hwfn *p_hwfn,
-			      enum ilt_clients ilt_client);
-
-u32 qed_cxt_get_total_srq_count(struct qed_hwfn *p_hwfn);
-
+void qed_tm_clear_vf_ilt(struct qed_hwfn *p_hwfn, u16 vf_idx);
+#endif /* _QED_CID_ */
 #endif
