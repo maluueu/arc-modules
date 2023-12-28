@@ -92,18 +92,6 @@ void usbnet_cdc_update_filter(struct usbnet *dev)
 }
 EXPORT_SYMBOL_GPL(usbnet_cdc_update_filter);
 
-/* We need to override usbnet_*_link_ksettings in bind() */
-static const struct ethtool_ops cdc_ether_ethtool_ops = {
-	.get_link		= usbnet_get_link,
-	.nway_reset		= usbnet_nway_reset,
-	.get_drvinfo		= usbnet_get_drvinfo,
-	.get_msglevel		= usbnet_get_msglevel,
-	.set_msglevel		= usbnet_set_msglevel,
-	.get_ts_info		= ethtool_op_get_ts_info,
-	.get_link_ksettings	= usbnet_get_link_ksettings_internal,
-	.set_link_ksettings	= NULL,
-};
-
 /* probes control interface, claims data interface, collects the bulk
  * endpoints, activates data interface (if needed), maybe sets MTU.
  * all pure cdc, except for certain firmware workarounds, and knowing
