@@ -1,12 +1,12 @@
 #
 # Copyright (C) 2023 AuxXxilium <https://github.com/AuxXxilium> and Ing <https://github.com/wjz304>
-#
+# 
 # This is free software, licensed under the MIT License.
 # See /LICENSE for more information.
 #
 
 # version: [ 7.1, 7.2 ]
-# platform: [ apollolake, broadwell, broadwellnk, denverton, epyc7002, geminilake, purley, r1000, v1000 ]
+# platform: [ apollolake, broadwell, broadwellnk, bromolow, denverton, epyc7002, geminilake, purley, r1000, v1000 ]
 # exclude:
 #   - version: 7.1
 #     platform: broadwell
@@ -14,13 +14,13 @@
 #   - version: "7.2"
 #     platform: "broadwell"
 
-name: Compile Modules
+name: Build modules
 
-on:
+on:  
   workflow_dispatch:
     inputs:
       version:
-        description: "format %y.%-m.$i or auto"
+        description: 'format %y.%-m.$i or auto'
         required: false
         type: string
       prerelease:
@@ -35,45 +35,65 @@ jobs:
         include:
           - version: 7.1 
             platform: apollolake
+            parm: "4.4.180"
           - version: 7.1
             platform: broadwell
+            parm: "4.4.180"
           - version: 7.1 
             platform: broadwellnk
+            parm: "4.4.180"
           - version: 7.1 
             platform: broadwellnkv2
+            parm: "4.4.180"
           - version: 7.1
             platform: denverton
+            parm: "4.4.180"
           #- version: 7.1
           #  platform: epyc7002
+          #  parm: "5.10.55"
           - version: 7.1 
             platform: geminilake
+            parm: "4.4.180"
           - version: 7.1 
             platform: purley
+            parm: "4.4.180"
           - version: 7.1
             platform: r1000
+            parm: "4.4.180"
           - version: 7.1
             platform: v1000
+            parm: "4.4.180"
 
           - version: 7.2 
             platform: apollolake
+            parm: "4.4.302"
           - version: 7.2
             platform: broadwell
+            parm: "4.4.302"
           - version: 7.2 
             platform: broadwellnk
+            parm: "4.4.302"
           - version: 7.2 
             platform: broadwellnkv2
+            parm: "4.4.302"
           - version: 7.2
             platform: denverton
-          #- version: 7.2
-          #  platform: epyc7002
+            parm: "4.4.302"
+          - version: 7.2
+            platform: epyc7002
+            parm: "5.10.55"
           - version: 7.2 
             platform: geminilake
+            parm: "4.4.302"
           - version: 7.2 
             platform: purley
+            parm: "4.4.302"
           - version: 7.2
             platform: r1000
+            parm: "4.4.302"
           - version: 7.2
             platform: v1000
+            parm: "4.4.302"
 
     runs-on: ubuntu-latest
 
@@ -86,7 +106,7 @@ jobs:
           git config --global user.email "info@auxxxilium.tech"
           git config --global user.name "AuxXxilium"
           sudo timedatectl set-timezone "Europe/Berlin" 
-
+          
       - name: Get EnvDeploy
         run: |
           ROOT_PATH=${{ github.workspace }}
@@ -96,11 +116,6 @@ jobs:
           git checkout DSM${{ matrix.version }}
           sudo ./EnvDeploy -v ${{ matrix.version }} -l  # Get Available platforms
           sudo ./EnvDeploy -q -v ${{ matrix.version }} -p ${{ matrix.platform }}
-
-          # Fault tolerance of pkgscripts-ng
-          if [ "${{ matrix.platform }}" == "broadwellntbap" -a "${{ matrix.version }}" == "7.1" ]; then
-            sed -i '/		broadwellnk	BROADWELLNK/a\		broadwellntbap  BROADWELLNTBAP                  linux-4.4.x             Intel Broadwell with ntb kernel config in AP mode' ${ROOT_PATH}/pkgscripts-ng/include/platforms
-          fi
 
           #ENV
           mkdir -p ${ROOT_PATH}/source
@@ -130,7 +145,7 @@ jobs:
             [ -f "/env64.mak" ] && echo "CCVER=${CCVER}" >> /env64.mak
           fi
           EOF
-
+          
           [ -f ${ENV_PATH}/env64.mak ] && ENV_FILE=${ENV_PATH}/env64.mak || ([ -f ${ENV_PATH}/env32.mak ] && ENV_FILE=${ENV_PATH}/env32.mak)
           if [ -n "${ENV_FILE}" ]; then
             KVER=`grep 'KVER=' ${ENV_FILE} | awk -F'=' '{print $2}'`
@@ -139,6 +154,44 @@ jobs:
             [ -n "${CCVER}" ] && echo "CCVER=${CCVER}" >> $GITHUB_ENV
           fi
 
+      - name: Get Src
+        run: |
+          ROOT_PATH=${{ github.workspace }}
+
+          mkdir -p ${ROOT_PATH}/source/output
+          repo=${{ env.repo }}
+          KVER=${{ env.KVER }}
+
+          sudo cp -a ${ROOT_PATH}/src/${KVER:0:1}.x ${ROOT_PATH}/source/input
+
+          sudo cp -a ${ROOT_PATH}/source ${ROOT_PATH}/build_env/ds.${{ matrix.platform }}-${{ matrix.version }}/
+
+      - name: Make
+        run: |
+          ROOT_PATH=${{ github.workspace }}
+
+          sudo chroot build_env/ds.${{ matrix.platform }}-${{ matrix.version }} << "EOF"
+          sed -i 's/^CFLAGS=/#CFLAGS=/g; s/^CXXFLAGS=/#CXXFLAGS=/g' /env${BUILD_ARCH}.mak
+          while read line; do if [ ${line:0:1} != "#" ]; then export ${line%%=*}="${line#*=}"; fi; done < /env${BUILD_ARCH}.mak
+          cd /source/input
+          [ -z "`grep 'env.mak' Makefile`" ] && sed -i '1 i include /env.mak' Makefile
+
+          if [ -f "defines.${{ matrix.platform }}" ]; then
+            PARMS+=" `cat "defines.${{ matrix.platform }}" | xargs`"
+          else
+            echo "[E] ${{ matrix.platform }}-${{ matrix.version }}"
+          fi
+          make -j`nproc` -C "${KSRC}" M="${PWD}" ${PARMS} modules
+          while read F; do
+            strip -g "${F}"
+            echo "Copying `basename ${F}`"
+            cp "${F}" "/source/output"
+          done < <(find ${PWD} -name \*.ko)
+          EOF
+
+          sudo cp -a ${ROOT_PATH}/build_env/ds.${{ matrix.platform }}-${{ matrix.version }}/source/output ${ROOT_PATH}/source/
+          sudo chmod a+rw -R ${ROOT_PATH}/source/output
+
       - name: Tar to Artifacts
         run: |
           if [ ! -d "${{ github.workspace }}/source/output" ]; then
@@ -146,40 +199,11 @@ jobs:
             chmod a+rw -R "${{ github.workspace }}/source/output"
           fi
 
-          OFFICIAL_PATH="${{ github.workspace }}/official/rd/${{ matrix.platform }}-${{ env.KVER }}"
-          PARTY3RD_PATH="${{ github.workspace }}/thirdparty/${{ matrix.platform }}-${{ env.KVER }}"
-
-          echo "copy 3rd modules"
-          [ -d "${PARTY3RD_PATH}" ] && cp -Rvf "${PARTY3RD_PATH}/." "${{ github.workspace }}/source/output"
-
-          echo "copy official modules"
-          OM=(cpufreq_performance i915 processor mlx4_core mlx4_en mlx4_ib mlx5_ib mlx5_core ehci-hcd ehci-pci uhci-hcd xhci-hcd xhci-pci)
-          for M in ${OM[@]}; do
-            function _copydepends() {
-              [ -f "${OFFICIAL_PATH}/${1}" ] && cp -f "${OFFICIAL_PATH}/${1}" "${{ github.workspace }}/source/output"
-              depends=($(modinfo "${OFFICIAL_PATH}/${1}" | grep depends: | awk -F: '{print $2}' | awk '$1=$1' | sed 's/,/ /g'))
-              if [ ${#depends[*]} -gt 0 ]; then
-                for k in ${depends[@]}; do
-                  _copydepends "${k}.ko"
-                done
-              fi
-            }
-            _copydepends "${M}.ko"
-          done
-
-          echo "check depends"
-          for M in `ls ${{ github.workspace }}/source/output`; do
-            depends=(`modinfo "${{ github.workspace }}/source/output/${M}" | grep depends: | awk -F: '{print $2}' | awk '$1=$1' | sed 's/,/ /g'`)
-            if [ ${#depends[*]} -gt 0 ]; then
-              for k in ${depends[@]}; do
-                if [ ! -f "${{ github.workspace }}/source/output/${k}.ko" ]; then
-                  [ -f "${OFFICIAL_PATH}/${k}.ko" ] && FLAG=O || FLAG=X
-                  echo "[W][${FLAG}] '${{ matrix.platform }}-${{ env.KVER }}' - '${M}' depends '${k}' does not exist."
-                fi
-              done
-            fi
-          done
-          tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ env.KVER }}.tgz -C ${{ github.workspace }}/source/output .
+          if [ "${{ matrix.platform }}" = "epyc7002" ]; then
+            tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.version }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
+          else
+            tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
+          fi
 
       - name: Upload to Artifacts
         uses: actions/upload-artifact@v3
@@ -188,9 +212,10 @@ jobs:
           path: |
             ${{ github.workspace }}/source/*.tgz
             
-      - name: Clean
+      - name: clean
         run: |
           sudo rm -rf ${{ github.workspace }}/build_env/ds.${{ matrix.platform }}-${{ matrix.version }}/source/*
+
 
   firmware:
     runs-on: ubuntu-latest
@@ -198,14 +223,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@main
-
-      - name: Download from Artifacts
+        
+      - name: download to artifacts
         uses: actions/download-artifact@v3
         with:
           name: modules
           path: ./modules
 
-      - name: Firmware
+      - name: firmware
         run: |
           mkdir -p firmware
 
@@ -220,13 +245,14 @@ jobs:
           SOURCE=/tmp/linux-firmware
           git clone https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git ${SOURCE}
           while read L; do
-            if [ -e "${SOURCE}/${L}" ]; then
+            FN="${SOURCE}/${L}"
+            if [ -e "${FN}" ]; then
               mkdir -p "`dirname firmware/${L}`"
-              cp "${SOURCE}/${L}" "firmware/${L}"
+              cp "${FN}" "firmware/${L}"
             else
-              [ -e "firmware/${L}" ] && echo "Used thirdparty ${L}" || echo "Missing ${L}"
+              echo "Missing ${FN}"
             fi
-          done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
+          done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print$2}')
 
           tar caf firmware.tgz -C firmware .
 
@@ -245,27 +271,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@main
-        with:
-          fetch-depth: 0
 
-      - name: Changelog
-        uses: Bullrich/generate-release-changelog@master
-        id: Changelog
-        env:
-          REPO: ${{ github.repository }}
-
-      - name: Init Env
+      - name: Calculate version
         run: |
-          git config --global user.email "info@auxxxilium.tech"
-          git config --global user.name "AuxXxilium"
-          sudo timedatectl set-timezone "Europe/Berlin" 
+          # Calculate version
+          VERSION=""
+          if [ ${{ github.event_name }} == 'release' -a ${{ github.ref_type }} == 'tag' ]; then
+            VERSION="${{ github.ref_name }}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            if [ "`echo ${{ inputs.version }} | cut -d '.' -f 1,2`" = "`date +'%y.%-m'`" ]; then
+              VERSION="${{ inputs.version }}"
+            else
+              LATEST_TAG="`curl -skL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r ".tag_name" 2>/dev/null`"
+              if [ -n "${LATEST_TAG}" -a "`echo ${LATEST_TAG} | cut -d '.' -f 1,2`" = "`date +'%y.%-m'`" ]; then  # format %y.%-m.$i
+                VERSION="`echo ${LATEST_TAG} | awk -F '.' '{$3=$3+1}1' OFS='.'`"
+              else
+                VERSION="`date +'%y.%-m'`.0"
+              fi
+            fi
+          else
+            VERSION=""
+          fi
+          echo "VERSION: ${VERSION}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: Download from Artifacts
-        uses: actions/download-artifact@v3
-        with:
-          name: modules
-          path: ./modules
-
+          - name: Download from Artifacts
+          uses: actions/download-artifact@v3
+          with:
+            name: modules
+            path: ./modules
+  
       - name: Calculate Version
         run: |
           # Calculate Version
@@ -274,10 +309,10 @@ jobs:
             VERSION="${{ inputs.version }}"
           else
             LATEST_TAG="`curl -skL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r ".tag_name" 2>/dev/null`"
-            if [ -n "${LATEST_TAG}" -a "`echo ${LATEST_TAG} | cut -d '.' -f 1,2`" = "`date +'%y.%-m'`" ]; then  # format %y.%-m.$i
+            if [[ -n "${LATEST_TAG}" && "`echo ${LATEST_TAG} | cut -d '.' -f 1,2`" = "`date +'%y.%-m.%-d'`" ]]; then  # format %y.%-m.$i
               VERSION="`echo ${LATEST_TAG} | awk -F '.' '{$3=$3+1}1' OFS='.'`"
             else
-              VERSION="`date +'%y.%-m'`.0"
+              VERSION="`date +'%y.%-m.%-d'`"
             fi
           fi
 
@@ -299,6 +334,7 @@ jobs:
         if: env.VERSION != ''
         with:
           tag_name: ${{ env.VERSION }}
+          prerelease: ${{ inputs.prerelease }}
           body: |
             ${{ steps.Changelog.outputs.changelog }}
           files: |
