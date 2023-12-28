@@ -1,8 +1,20 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * CDC Ethernet based networking peripherals
  * Copyright (C) 2003-2005 by David Brownell
  * Copyright (C) 2006 by Ole Andre Vadla Ravnas (ActiveSync)
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 // #define	DEBUG			// error path messages, extra info
@@ -42,19 +54,11 @@ static int is_wireless_rndis(struct usb_interface_descriptor *desc)
 		desc->bInterfaceProtocol == 3);
 }
 
-static int is_novatel_rndis(struct usb_interface_descriptor *desc)
-{
-	return (desc->bInterfaceClass == USB_CLASS_MISC &&
-		desc->bInterfaceSubClass == 4 &&
-		desc->bInterfaceProtocol == 1);
-}
-
 #else
 
 #define is_rndis(desc)		0
 #define is_activesync(desc)	0
 #define is_wireless_rndis(desc)	0
-#define is_novatel_rndis(desc)	0
 
 #endif
 
@@ -63,8 +67,10 @@ static const u8 mbm_guid[16] = {
 	0xa6, 0x07, 0xc0, 0xff, 0xcb, 0x7e, 0x39, 0x2a,
 };
 
-void usbnet_cdc_update_filter(struct usbnet *dev)
+static void usbnet_cdc_update_filter(struct usbnet *dev)
 {
+	struct cdc_state	*info = (void *) &dev->data;
+	struct usb_interface	*intf = info->control;
 	struct net_device	*net = dev->net;
 
 	u16 cdc_filter = USB_CDC_PACKET_TYPE_DIRECTED
@@ -84,13 +90,12 @@ void usbnet_cdc_update_filter(struct usbnet *dev)
 			USB_CDC_SET_ETHERNET_PACKET_FILTER,
 			USB_TYPE_CLASS | USB_RECIP_INTERFACE,
 			cdc_filter,
-			dev->intf->cur_altsetting->desc.bInterfaceNumber,
+			intf->cur_altsetting->desc.bInterfaceNumber,
 			NULL,
 			0,
 			USB_CTRL_SET_TIMEOUT
 		);
 }
-EXPORT_SYMBOL_GPL(usbnet_cdc_update_filter);
 
 /* probes control interface, claims data interface, collects the bulk
  * endpoints, activates data interface (if needed), maybe sets MTU.
@@ -145,8 +150,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	 */
 	rndis = (is_rndis(&intf->cur_altsetting->desc) ||
 		 is_activesync(&intf->cur_altsetting->desc) ||
-		 is_wireless_rndis(&intf->cur_altsetting->desc) ||
-		 is_novatel_rndis(&intf->cur_altsetting->desc));
+		 is_wireless_rndis(&intf->cur_altsetting->desc));
 
 	memset(info, 0, sizeof(*info));
 	info->control = intf;
@@ -166,8 +170,10 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	 * probed with) and a slave/data interface; union
 	 * descriptors sort this all out.
 	 */
-	info->control = usb_ifnum_to_if(dev->udev, info->u->bMasterInterface0);
-	info->data = usb_ifnum_to_if(dev->udev, info->u->bSlaveInterface0);
+	info->control = usb_ifnum_to_if(dev->udev,
+	info->u->bMasterInterface0);
+	info->data = usb_ifnum_to_if(dev->udev,
+		info->u->bSlaveInterface0);
 	if (!info->control || !info->data) {
 		dev_dbg(&intf->dev,
 			"master #%u/%p slave #%u/%p\n",
@@ -201,11 +207,12 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	/* a data interface altsetting does the real i/o */
 	d = &info->data->cur_altsetting->desc;
 	if (d->bInterfaceClass != USB_CLASS_CDC_DATA) {
-		dev_dbg(&intf->dev, "slave class %u\n", d->bInterfaceClass);
+		dev_dbg(&intf->dev, "slave class %u\n",
+			d->bInterfaceClass);
 		goto bad_desc;
 	}
 skip:
-	/* Communication class functions with bmCapabilities are not
+	/* Communcation class functions with bmCapabilities are not
 	 * RNDIS.  But some Wireless class RNDIS functions use
 	 * bmCapabilities for their own purpose. The failsafe is
 	 * therefore applied only to Communication class RNDIS
@@ -215,10 +222,10 @@ skip:
 	if (rndis && is_rndis(&intf->cur_altsetting->desc) &&
 	    header.usb_cdc_acm_descriptor &&
 	    header.usb_cdc_acm_descriptor->bmCapabilities) {
-		dev_dbg(&intf->dev,
-			"ACM capabilities %02x, not really RNDIS?\n",
-			header.usb_cdc_acm_descriptor->bmCapabilities);
-		goto bad_desc;
+			dev_dbg(&intf->dev,
+				"ACM capabilities %02x, not really RNDIS?\n",
+				header.usb_cdc_acm_descriptor->bmCapabilities);
+			goto bad_desc;
 	}
 
 	if (header.usb_cdc_ether_desc && info->ether->wMaxSegmentSize) {
@@ -229,7 +236,7 @@ skip:
 	}
 
 	if (header.usb_cdc_mdlm_desc &&
-	    memcmp(header.usb_cdc_mdlm_desc->bGUID, mbm_guid, 16)) {
+		memcmp(header.usb_cdc_mdlm_desc->bGUID, mbm_guid, 16)) {
 		dev_dbg(&intf->dev, "GUID doesn't match\n");
 		goto bad_desc;
 	}
@@ -293,7 +300,7 @@ skip:
 	if (info->control->cur_altsetting->desc.bNumEndpoints == 1) {
 		struct usb_endpoint_descriptor	*desc;
 
-		dev->status = &info->control->cur_altsetting->endpoint[0];
+		dev->status = &info->control->cur_altsetting->endpoint [0];
 		desc = &dev->status->desc;
 		if (!usb_endpoint_is_int_in(desc) ||
 		    (le16_to_cpu(desc->wMaxPacketSize)
@@ -310,8 +317,12 @@ skip:
 		return -ENODEV;
 	}
 
-	/* override ethtool_ops */
-	dev->net->ethtool_ops = &cdc_ether_ethtool_ops;
+	/* Some devices don't initialise properly. In particular
+	 * the packet filter is not reset. There are devices that
+	 * don't do reset all the way. So the packet filter should
+	 * be set to a sane initial value.
+	 */
+	usbnet_cdc_update_filter(dev);
 
 	return 0;
 
@@ -320,30 +331,6 @@ bad_desc:
 	return -ENODEV;
 }
 EXPORT_SYMBOL_GPL(usbnet_generic_cdc_bind);
-
-
-/* like usbnet_generic_cdc_bind() but handles filter initialization
- * correctly
- */
-int usbnet_ether_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
-{
-	int rv;
-
-	rv = usbnet_generic_cdc_bind(dev, intf);
-	if (rv < 0)
-		goto bail_out;
-
-	/* Some devices don't initialise properly. In particular
-	 * the packet filter is not reset. There are devices that
-	 * don't do reset all the way. So the packet filter should
-	 * be set to a sane initial value.
-	 */
-	usbnet_cdc_update_filter(dev);
-
-bail_out:
-	return rv;
-}
-EXPORT_SYMBOL_GPL(usbnet_ether_cdc_bind);
 
 void usbnet_cdc_unbind(struct usbnet *dev, struct usb_interface *intf)
 {
@@ -382,10 +369,12 @@ EXPORT_SYMBOL_GPL(usbnet_cdc_unbind);
  * (by Brad Hards) talked with, with more functionality.
  */
 
-static void speed_change(struct usbnet *dev, __le32 *speeds)
+static void dumpspeed(struct usbnet *dev, __le32 *speeds)
 {
-	dev->tx_speed = __le32_to_cpu(speeds[0]);
-	dev->rx_speed = __le32_to_cpu(speeds[1]);
+	netif_info(dev, timer, dev->net,
+		   "link speeds: %u kbps up, %u kbps down\n",
+		   __le32_to_cpu(speeds[0]) / 1000,
+		   __le32_to_cpu(speeds[1]) / 1000);
 }
 
 void usbnet_cdc_status(struct usbnet *dev, struct urb *urb)
@@ -397,7 +386,7 @@ void usbnet_cdc_status(struct usbnet *dev, struct urb *urb)
 
 	/* SPEED_CHANGE can get split into two 8-byte packets */
 	if (test_and_clear_bit(EVENT_STS_SPLIT, &dev->flags)) {
-		speed_change(dev, (__le32 *) urb->transfer_buffer);
+		dumpspeed(dev, (__le32 *) urb->transfer_buffer);
 		return;
 	}
 
@@ -414,7 +403,7 @@ void usbnet_cdc_status(struct usbnet *dev, struct urb *urb)
 		if (urb->actual_length != (sizeof(*event) + 8))
 			set_bit(EVENT_STS_SPLIT, &dev->flags);
 		else
-			speed_change(dev, (__le32 *) &event[1]);
+			dumpspeed(dev, (__le32 *) &event[1]);
 		break;
 	/* USB_CDC_NOTIFY_RESPONSE_AVAILABLE can happen too (e.g. RNDIS),
 	 * but there are no standard formats for the response data.
@@ -435,7 +424,7 @@ int usbnet_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	BUILD_BUG_ON((sizeof(((struct usbnet *)0)->data)
 			< sizeof(struct cdc_state)));
 
-	status = usbnet_ether_cdc_bind(dev, intf);
+	status = usbnet_generic_cdc_bind(dev, intf);
 	if (status < 0)
 		return status;
 
@@ -450,65 +439,6 @@ int usbnet_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 }
 EXPORT_SYMBOL_GPL(usbnet_cdc_bind);
 
-static int usbnet_cdc_zte_bind(struct usbnet *dev, struct usb_interface *intf)
-{
-	int status = usbnet_cdc_bind(dev, intf);
-
-	if (!status && (dev->net->dev_addr[0] & 0x02))
-		eth_hw_addr_random(dev->net);
-
-	return status;
-}
-
-/* Make sure packets have correct destination MAC address
- *
- * A firmware bug observed on some devices (ZTE MF823/831/910) is that the
- * device sends packets with a static, bogus, random MAC address (event if
- * device MAC address has been updated). Always set MAC address to that of the
- * device.
- */
-int usbnet_cdc_zte_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
-{
-	if (skb->len < ETH_HLEN || !(skb->data[0] & 0x02))
-		return 1;
-
-	skb_reset_mac_header(skb);
-	ether_addr_copy(eth_hdr(skb)->h_dest, dev->net->dev_addr);
-
-	return 1;
-}
-EXPORT_SYMBOL_GPL(usbnet_cdc_zte_rx_fixup);
-
-/* Ensure correct link state
- *
- * Some devices (ZTE MF823/831/910) export two carrier on notifications when
- * connected. This causes the link state to be incorrect. Work around this by
- * always setting the state to off, then on.
- */
-static void usbnet_cdc_zte_status(struct usbnet *dev, struct urb *urb)
-{
-	struct usb_cdc_notification *event;
-
-	if (urb->actual_length < sizeof(*event))
-		return;
-
-	event = urb->transfer_buffer;
-
-	if (event->bNotificationType != USB_CDC_NOTIFY_NETWORK_CONNECTION) {
-		usbnet_cdc_status(dev, urb);
-		return;
-	}
-
-	netif_dbg(dev, timer, dev->net, "CDC: carrier %s\n",
-		  event->wValue ? "on" : "off");
-
-	if (event->wValue &&
-	    netif_carrier_ok(dev->net))
-		netif_carrier_off(dev->net);
-
-	usbnet_link_change(dev, !!event->wValue, 0);
-}
-
 static const struct driver_info	cdc_info = {
 	.description =	"CDC Ethernet Device",
 	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT,
@@ -517,17 +447,6 @@ static const struct driver_info	cdc_info = {
 	.status =	usbnet_cdc_status,
 	.set_rx_mode =	usbnet_cdc_update_filter,
 	.manage_power =	usbnet_manage_power,
-};
-
-static const struct driver_info	zte_cdc_info = {
-	.description =	"ZTE CDC Ethernet Device",
-	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT,
-	.bind =		usbnet_cdc_zte_bind,
-	.unbind =	usbnet_cdc_unbind,
-	.status =	usbnet_cdc_zte_status,
-	.set_rx_mode =	usbnet_cdc_update_filter,
-	.manage_power =	usbnet_manage_power,
-	.rx_fixup = usbnet_cdc_zte_rx_fixup,
 };
 
 static const struct driver_info wwan_info = {
