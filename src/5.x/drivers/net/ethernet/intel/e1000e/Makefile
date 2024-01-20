@@ -12,7 +12,6 @@ ifneq ($(KERNELRELEASE),)
 obj-$(CONFIG_E1000E) += e1000e.o
 
 define e1000e-y
-	netdev.o
 	ethtool.o
 	ich8lan.o
 	mac.o
@@ -22,6 +21,7 @@ define e1000e-y
 	80003es2lan.o
 	82571.o
 	param.o
+	ptp.o
 endef
 e1000e-y := $(strip ${e1000e-y})
 
