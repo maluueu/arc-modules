@@ -27,6 +27,10 @@ on:
         description: "pre release"
         default: false
         type: boolean
+      firmware:
+        description: "firmware"
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -163,20 +167,22 @@ jobs:
           MODULES_PATH="${{ github.workspace }}/modules/firmware"
           cp -rf ${MODULES_PATH}/* firmware/
 
-          echo "extract all modules"
-          for F in ./modules/*.tgz; do mkdir "${F%.tgz}" && tar -xzf "${F}" -C "${F%.tgz}"; done
-          
-          echo "get firmware"
-          SOURCE=/tmp/linux-firmware
-          git clone https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git ${SOURCE}
-          while read -r L; do
-            if [ -e "${SOURCE}/${L}" ]; then
-              mkdir -p "`dirname firmware/${L}`"
-              cp "${SOURCE}/${L}" "firmware/${L}"
-            else
-              [ -e "firmware/${L}" ] && echo "Used modules ${L}" || echo "Missing ${L}"
-            fi
-          done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
+          if [ "${{ inputs.firmware }}" == "true" ]; then
+            echo "extract all modules"
+            for F in ./modules/*.tgz; do mkdir "${F%.tgz}" && tar -xzf "${F}" -C "${F%.tgz}"; done
+
+            echo "get firmware"
+            SOURCE=/tmp/linux-firmware
+            git clone https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git ${SOURCE}
+            while read -r L; do
+              if [ -e "${SOURCE}/${L}" ]; then
+                mkdir -p "`dirname firmware/${L}`"
+                cp "${SOURCE}/${L}" "firmware/${L}"
+              else
+                [ -e "firmware/${L}" ] && echo "Used modules ${L}" || echo "Missing ${L}"
+              fi
+            done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
+          fi
 
           tar caf firmware.tgz -C firmware .
 
