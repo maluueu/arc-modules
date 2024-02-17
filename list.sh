@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 root=$(pwd)
-start=${root}/thirdparty
+start=${root}/modules
 rm -f ${start}/modules.yml
 touch ${start}/modules.yml
 echo "## List of included modules" >>${start}/modules.yml
