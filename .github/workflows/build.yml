@@ -134,15 +134,15 @@ jobs:
           [ -d "${MODULES_PATH}" ] && cp -Rvf "${MODULES_PATH}/." "${{ github.workspace }}/source/output"
 
           if [ "${{ matrix.platform }}" = "epyc7002" ]; then
-            tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.version }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
+            tar -zcf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.version }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
           else
-            tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
+            tar -zcf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
           fi
 
       - name: Upload to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: modules
+          name: modules-${{ matrix.version }}-${{ matrix.platform }}
           path: |
             ${{ github.workspace }}/source/*.tgz
 
@@ -156,8 +156,9 @@ jobs:
       - name: Download from Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: modules
-          path: ./modules
+          path: output
+          pattern: modules-*
+          merge-multiple: true
 
       - name: Firmware
         run: |
@@ -184,12 +185,12 @@ jobs:
             done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
           fi
 
-          tar caf firmware.tgz -C firmware .
+          tar -zcf firmware.tgz -C firmware .
 
       - name: Upload to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: modules
+          name: modules-firmware
           path: |
             firmware.tgz
 
@@ -217,8 +218,9 @@ jobs:
       - name: Download from Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: modules
-          path: ./modules
+          path: output
+          pattern: modules-*
+          merge-multiple: true
 
       - name: Calculate Version
         run: |
@@ -239,18 +241,18 @@ jobs:
             # Modify Source File
             echo "Version: ${VERSION}"
             echo "${VERSION}" >VERSION
-            echo "${VERSION}" >"./modules/VERSION"
+            echo "${VERSION}" >"./output/VERSION"
             echo "VERSION=${VERSION}" >> $GITHUB_ENV
           fi
 
       - name: Zip Modules
         if: success() && env.VERSION != ''
         run: |
-          zip -9 modules.zip -j modules/*
+          zip -9 modules.zip -j output/*
 
       - name: Release
-        uses: softprops/action-gh-release@v1
         if: success() && env.VERSION != ''
+        uses: ncipollo/release-action@v1
         with:
           tag_name: ${{ env.VERSION }}
           prerelease: ${{ inputs.prerelease }}
@@ -258,4 +260,4 @@ jobs:
             ${{ steps.Changelog.outputs.changelog }}
           files: |
               modules.zip
-              ./modules/*.tgz
+              ./output/*.tgz
