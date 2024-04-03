@@ -140,7 +140,7 @@ jobs:
           fi
 
       - name: Upload to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: modules
           path: |
@@ -154,7 +154,7 @@ jobs:
         uses: actions/checkout@main
 
       - name: Download from Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: modules
           path: ./modules
@@ -187,7 +187,7 @@ jobs:
           tar caf firmware.tgz -C firmware .
 
       - name: Upload to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: modules
           path: |
@@ -215,7 +215,7 @@ jobs:
           sudo timedatectl set-timezone "Europe/Berlin" 
 
       - name: Download from Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: modules
           path: ./modules
@@ -244,13 +244,13 @@ jobs:
           fi
 
       - name: Zip Modules
-        if: env.VERSION != ''
+        if: success() && env.VERSION != ''
         run: |
           zip -9 modules.zip -j modules/*
 
       - name: Release
         uses: softprops/action-gh-release@v1
-        if: env.VERSION != ''
+        if: success() && env.VERSION != ''
         with:
           tag_name: ${{ env.VERSION }}
           prerelease: ${{ inputs.prerelease }}
