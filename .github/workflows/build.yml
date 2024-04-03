@@ -134,15 +134,15 @@ jobs:
           [ -d "${MODULES_PATH}" ] && cp -Rvf "${MODULES_PATH}/." "${{ github.workspace }}/source/output"
 
           if [ "${{ matrix.platform }}" = "epyc7002" ]; then
-            tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.version }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
+            tar -zcf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.version }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
           else
-            tar caf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
+            tar -zcf ${{ github.workspace }}/source/${{ matrix.platform }}-${{ matrix.parm }}.tgz -C ${{ github.workspace }}/source/output .
           fi
 
       - name: Upload to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: modules
+          name: modules-${{ matrix.version }}-${{ matrix.platform }}
           path: |
             ${{ github.workspace }}/source/*.tgz
 
@@ -154,10 +154,11 @@ jobs:
         uses: actions/checkout@main
 
       - name: Download from Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: modules
-          path: ./modules
+          path: output
+          pattern: modules-*
+          merge-multiple: true
 
       - name: Firmware
         run: |
@@ -169,7 +170,7 @@ jobs:
 
           if [ "${{ inputs.firmware }}" == "true" ]; then
             echo "extract all modules"
-            for F in ./modules/*.tgz; do mkdir "${F%.tgz}" && tar -xzf "${F}" -C "${F%.tgz}"; done
+            for F in ./output/*.tgz; do mkdir "${F%.tgz}" && tar -xzf "${F}" -C "${F%.tgz}"; done
 
             echo "get firmware"
             SOURCE=/tmp/linux-firmware
@@ -181,15 +182,15 @@ jobs:
               else
                 [ -e "firmware/${L}" ] && echo "Used modules ${L}" || echo "Missing ${L}"
               fi
-            done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
+            done < <(find ./output -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
           fi
 
-          tar caf firmware.tgz -C firmware .
+          tar -zcf firmware.tgz -C firmware .
 
       - name: Upload to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: modules
+          name: modules-firmware
           path: |
             firmware.tgz
 
@@ -215,10 +216,11 @@ jobs:
           sudo timedatectl set-timezone "Europe/Berlin" 
 
       - name: Download from Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: modules
-          path: ./modules
+          path: output
+          pattern: modules-*
+          merge-multiple: true
 
       - name: Calculate Version
         run: |
@@ -239,23 +241,24 @@ jobs:
             # Modify Source File
             echo "Version: ${VERSION}"
             echo "${VERSION}" >VERSION
-            echo "${VERSION}" >"./modules/VERSION"
+            echo "${VERSION}" >"./output/VERSION"
             echo "VERSION=${VERSION}" >> $GITHUB_ENV
           fi
 
       - name: Zip Modules
-        if: env.VERSION != ''
+        if: success() && env.VERSION != ''
         run: |
-          zip -9 modules.zip -j modules/*
+          zip -9 modules.zip -j output/*
 
       - name: Release
-        uses: softprops/action-gh-release@v1
-        if: env.VERSION != ''
+        if: success() && env.VERSION != ''
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ env.VERSION }}
+          tag: ${{ env.VERSION }}
           prerelease: ${{ inputs.prerelease }}
+          allowUpdates: true
           body: |
             ${{ steps.Changelog.outputs.changelog }}
-          files: |
+          artifacts: |
               modules.zip
-              ./modules/*.tgz
+              ./output/*.tgz
