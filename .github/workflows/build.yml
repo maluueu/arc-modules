@@ -165,12 +165,12 @@ jobs:
           mkdir -p firmware
 
           echo "copy 3rd modules"
-          MODULES_PATH="${{ github.workspace }}/modules/firmware"
+          MODULES_PATH="${{ github.workspace }}/output/firmware"
           cp -rf ${MODULES_PATH}/* firmware/
 
           if [ "${{ inputs.firmware }}" == "true" ]; then
             echo "extract all modules"
-            for F in ./modules/*.tgz; do mkdir "${F%.tgz}" && tar -xzf "${F}" -C "${F%.tgz}"; done
+            for F in ./output/*.tgz; do mkdir "${F%.tgz}" && tar -xzf "${F}" -C "${F%.tgz}"; done
 
             echo "get firmware"
             SOURCE=/tmp/linux-firmware
@@ -182,7 +182,7 @@ jobs:
               else
                 [ -e "firmware/${L}" ] && echo "Used modules ${L}" || echo "Missing ${L}"
               fi
-            done < <(find ./modules -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
+            done < <(find ./output -name \*.ko -exec sh -c '/sbin/modinfo {} | grep ^firmware' \; | awk '{print $2}')
           fi
 
           tar -zcf firmware.tgz -C firmware .
