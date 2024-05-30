@@ -249,6 +249,7 @@ jobs:
         if: success() && env.VERSION != ''
         run: |
           zip -9 modules.zip -j output/*
+          sha256sum modules.zip >checksum.sha256
 
       - name: Release
         if: success() && env.VERSION != ''
@@ -262,3 +263,4 @@ jobs:
           artifacts: |
               modules.zip
               ./output/*.tgz
+              checksum.sha256
