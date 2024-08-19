@@ -4257,8 +4257,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 		 */
 		if (MASKED_DEVICE(lunaddrbytes) &&
 				this_device->physical_device) {
-			if (is_disk_or_zbc(this_device) &&
-					h->nvram_hba_mode_enabled)
+			if (h->nvram_hba_mode_enabled)
 				this_device->expose_device = 1;
 			else
 				this_device->expose_device = 0;
