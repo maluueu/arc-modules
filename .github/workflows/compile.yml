@@ -25,7 +25,7 @@ on:
         type: string
       module:
         description: 'CONFIG_MODULE=m'
-        reguired: false
+        required: false
         type: string
 
 jobs:
@@ -177,9 +177,9 @@ jobs:
           [ -z "`grep 'env.mak' Makefile`" ] && sed -i '1 i include /env.mak' Makefile
 
           if [ -n "${{ inputs.module }}" ]; then 
-            PARMS+="${{ inputs.module }}"
+            PARMS="${{ inputs.module }}"
           elif [ -f "defines.${{ matrix.platform }}" ]; then
-            PARMS+=" `cat "defines.${{ matrix.platform }}" | xargs`"
+            PARMS="`cat "defines.${{ matrix.platform }}" | xargs`"
           else
             echo "[E] ${{ matrix.platform }}-${{ matrix.version }}"
           fi
@@ -208,7 +208,7 @@ jobs:
           fi
 
       - name: Upload to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: modules
           path: |
