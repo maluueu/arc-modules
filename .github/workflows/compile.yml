@@ -177,9 +177,9 @@ jobs:
           [ -z "`grep 'env.mak' Makefile`" ] && sed -i '1 i include /env.mak' Makefile
 
           if [ -n "${{ inputs.module }}" ]; then 
-            PARMS+="${{ inputs.module }}"
+            PARMS="${{ inputs.module }}"
           elif [ -f "defines.${{ matrix.platform }}" ]; then
-            PARMS+=" `cat "defines.${{ matrix.platform }}" | xargs`"
+            PARMS="`cat "defines.${{ matrix.platform }}" | xargs`"
           else
             echo "[E] ${{ matrix.platform }}-${{ matrix.version }}"
           fi
