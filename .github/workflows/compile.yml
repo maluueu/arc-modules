@@ -25,7 +25,7 @@ on:
         type: string
       module:
         description: 'CONFIG_MODULE=m'
-        reguired: false
+        required: false
         type: string
 
 jobs:
@@ -208,7 +208,7 @@ jobs:
           fi
 
       - name: Upload to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: modules
           path: |
